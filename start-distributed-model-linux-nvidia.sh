@@ -47,6 +47,20 @@ model_alias_from_path() {
     basename "$path" | sed -E 's/\.[Gg][Gg][Uu][Ff]$//'
 }
 
+ensure_server_port_free() {
+    local port="$1"
+
+    if command -v ss >/dev/null 2>&1 && ss -ltn "sport = :$port" | grep -q LISTEN; then
+        echo "ERROR: Server port $port is already in use on this machine. Stop the existing llama-server or choose a different port."
+        exit 1
+    fi
+
+    if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+        echo "ERROR: Server port $port is already in use on this machine. Stop the existing llama-server or choose a different port."
+        exit 1
+    fi
+}
+
 echo "============================================================"
 echo " llama.cpp MAIN/JOINER - Linux CUDA + RPC"
 echo "============================================================"
@@ -196,6 +210,7 @@ COMMON_ARGS=(
 if [[ "$MODE" == "cli" ]]; then
     exec "$APP" "${COMMON_ARGS[@]}"
 else
+    ensure_server_port_free "$SERVER_PORT"
     echo "llama-server: http://${SERVER_BIND}:${SERVER_PORT}"
     echo
     exec "$APP" \

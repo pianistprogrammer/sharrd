@@ -36,7 +36,7 @@ macOS release builds are configured for Developer ID signing with hardened runti
 ```bash
 APPLE_ID="you@example.com" \
 APPLE_PASSWORD="app-specific-password" \
-APPLE_TEAM_ID="2JA6D4683T" \
+APPLE_TEAM_ID="your-team-id" \
 npm run tauri:build
 ```
 

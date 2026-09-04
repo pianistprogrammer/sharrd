@@ -132,6 +132,14 @@ wait_for_tcp() {
     return 1
 }
 
+ensure_server_port_free() {
+    local port="$1"
+
+    if command -v nc >/dev/null 2>&1 && nc -z -G 1 127.0.0.1 "$port" >/dev/null 2>&1; then
+        die "Server port $port is already in use on this Mac. Stop the existing llama-server or choose a different port."
+    fi
+}
+
 # ----- Discover workers -----
 echo "[1/5] Discovering Macs sharing llama.cpp RPC..."
 BROWSE_LOG="$(mktemp -t llama-rpc-browse.XXXXXX)"
@@ -326,6 +334,7 @@ COMMON_ARGS=(
 if [[ "$MODE" == "cli" ]]; then
     exec "$CLI_EXE" "${COMMON_ARGS[@]}"
 else
+    ensure_server_port_free "$SERVER_PORT"
     echo "llama-server: http://${SERVER_HOST}:${SERVER_PORT}"
     echo
     exec "$SERVER_EXE" \

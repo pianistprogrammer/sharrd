@@ -54,6 +54,17 @@ model_alias_from_path() {
     basename "$path" | sed -E 's/\.[Gg][Gg][Uu][Ff]$//'
 }
 
+ensure_server_port_free() {
+    local port="$1"
+
+    if powershell.exe -NoProfile -Command "if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) { exit 1 }"; then
+        return 0
+    fi
+
+    echo "ERROR: Server port $port is already in use on this machine. Stop the existing llama-server or choose a different port."
+    exit 1
+}
+
 need_cmd git
 need_cmd cmake
 need_cmd powershell.exe
@@ -255,6 +266,7 @@ COMMON_ARGS=(
 if [[ "$MODE" == "cli" ]]; then
     exec "$APP" "${COMMON_ARGS[@]}"
 else
+    ensure_server_port_free "$SERVER_PORT"
     echo "Server bind: $SERVER_BIND:$SERVER_PORT"
     echo
     exec "$APP" \

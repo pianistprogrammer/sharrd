@@ -194,6 +194,7 @@ function App() {
   const waitsForServerRef = useRef(false);
   const modelPathInputRef = useRef<HTMLInputElement | null>(null);
   const rpcPortInputRef = useRef<HTMLInputElement | null>(null);
+  const logWindowRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -403,27 +404,35 @@ function App() {
     [logs, sessionId],
   );
   const serverUrl = getServerUrl(options, hostInfo);
-  const serverAnnounced = useMemo(() => hasLog(sessionLogs, /^llama-server:\s*http:\/\//i), [sessionLogs]);
-  const showServerUrl = options.role === "host" && options.mode === "server" && (running || ready || serverAnnounced);
+  const serverListening = useMemo(() => hasLog(sessionLogs, (line) => isServerReadyLine(line)), [sessionLogs]);
+  const sessionLive = Boolean(sessionId) && running;
+  const showServerUrl = options.role === "host" && options.mode === "server" && sessionLive;
   const distribution = useMemo(() => getLoadDistribution(sessionLogs), [sessionLogs]);
   const workerNodes = useMemo(() => getWorkerNodes(sessionLogs), [sessionLogs]);
   const filteredLogs = useMemo(() => filterLogs(logs, logFilter), [logFilter, logs]);
   const sessionPid = useMemo(() => getSessionPid(logs, sessionId), [logs, sessionId]);
   const activeRequirements = preview?.requirements ?? [];
   const systemStages = useMemo(
-    () => getSystemStages(options, sessionLogs, running, ready, status, error),
-    [error, options, ready, running, sessionLogs, status],
+    () => getSystemStages(options, sessionLogs, sessionLive, ready || serverListening, status, error),
+    [error, options, ready, serverListening, sessionLive, sessionLogs, status],
   );
   const modelName = useMemo(() => getModelDisplayName(options.modelPath), [options.modelPath]);
-  const clusterLabel = getClusterLabel(options, running, workerNodes.length);
+  const clusterLabel = getClusterLabel(options, sessionLive, workerNodes.length);
   const theme = themeOverride ?? systemTheme;
 
   useEffect(() => {
-    if (serverAnnounced && running && waitsForServerRef.current && !ready) {
+    if (serverListening && sessionLive && waitsForServerRef.current && !ready) {
       setReady(true);
       setStatus("Running");
     }
-  }, [ready, running, serverAnnounced]);
+  }, [ready, serverListening, sessionLive]);
+
+  useEffect(() => {
+    if (!autoscroll || !logsOpen) return;
+    const element = logWindowRef.current;
+    if (!element) return;
+    element.scrollTop = element.scrollHeight;
+  }, [autoscroll, filteredLogs.length, logsOpen]);
 
   const focusPrimaryInput = () => {
     const input = options.role === "host" ? modelPathInputRef.current : rpcPortInputRef.current;
@@ -570,8 +579,8 @@ function App() {
                     </div>
                     <code>{options.stack === "apple" ? "Bonjour discovery" : "UDP discovery"}</code>
                     <p>
-                      <span>{running ? "Waiting" : "Standby"}</span>
-                      <strong>{running ? "Scanning" : "Idle"}</strong>
+                      <span>{sessionLive ? "Waiting" : "Standby"}</span>
+                      <strong>{sessionLive ? "Scanning" : "Idle"}</strong>
                     </p>
                   </div>
                 )}
@@ -579,9 +588,9 @@ function App() {
             </div>
 
             <div className="rail-status-card">
-              <span className={running ? "small-dot active" : "small-dot"} />
+              <span className={sessionLive ? "small-dot active" : "small-dot"} />
               <div>
-                <strong>{running ? "Session active" : "Standing by"}</strong>
+                <strong>{sessionLive ? "Session active" : "Standing by"}</strong>
                 <span>{options.stack === "apple" ? "Bonjour / Metal RPC" : "LAN RPC discovery"}</span>
               </div>
             </div>
@@ -597,11 +606,11 @@ function App() {
               </div>
 
               <div className="action-row">
-                <button className="icon-button restart-button" disabled={!running} onClick={restart} title="Restart cluster pipeline" type="button">
+                <button className="icon-button restart-button" disabled={!sessionId || !sessionLive} onClick={restart} title="Restart cluster pipeline" type="button">
                   <RotateCcw size={15} />
                 </button>
-                {running ? (
-                  <button className="stop-button primary-stop-button" onClick={stop} type="button">
+                {sessionLive ? (
+                  <button className="stop-button primary-stop-button" disabled={!sessionId} onClick={stop} type="button">
                     <Square size={15} />
                     <span>Stop Engine</span>
                   </button>
@@ -748,7 +757,7 @@ function App() {
                   <DistributionCard
                     distribution={distribution}
                     modelPath={options.modelPath}
-                    running={running}
+                    running={sessionLive}
                   />
                 ) : null}
               </section>
@@ -818,7 +827,7 @@ function App() {
                     </button>
                   </div>
                 </div>
-                <div className={autoscroll ? "log-window autoscroll" : "log-window"}>
+                <div className={autoscroll ? "log-window autoscroll" : "log-window"} ref={logWindowRef}>
                   {filteredLogs.length === 0 ? (
                     <p className="empty-log">Logs appear here when a session starts.</p>
                   ) : (
@@ -844,8 +853,8 @@ function App() {
         <footer className="footerbar">
           <div>
             <span>
-              <span className={running ? "small-dot active" : "small-dot"} />
-              <strong>{running ? "Engine Active" : "Engine Idle"}</strong>
+              <span className={sessionLive ? "small-dot active" : "small-dot"} />
+              <strong>{sessionLive ? "Engine Active" : "Engine Idle"}</strong>
             </span>
             {options.role === "host" ? (
               <span className="footer-model" title={options.modelPath}>Model: {modelName}</span>
@@ -1097,7 +1106,7 @@ function getSystemStages(
   error: string | null,
 ): SystemStage[] {
   const serverReady = hasLog(logs, (line) => isServerReadyLine(line));
-  const blocked = !serverReady && (Boolean(error) || /\b(error|failed|abort|exited \([1-9])/i.test(status) || hasLog(logs, isFatalLogLine));
+  const blocked = !running && !ready && !serverReady && (Boolean(error) || /\b(error|failed|abort|exited \([1-9])/i.test(status) || hasLog(logs, isFatalLogLine));
   const started = running || logs.length > 0;
 
   const definitions = options.role === "host"
@@ -1219,7 +1228,6 @@ function getServerUrl(options: LaunchOptions, hostInfo: HostInfo | null) {
 function isServerReadyLine(line: string) {
   const normalized = line.toLowerCase();
   return (
-    normalized.startsWith("llama-server: http://") ||
     normalized.includes("server is listening") ||
     normalized.includes("server listening") ||
     normalized.includes("server started") ||
