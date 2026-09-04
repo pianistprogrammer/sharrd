@@ -229,6 +229,14 @@ done <<< "$SERVICE_NAMES"
 
 echo
 echo "RPC worker(s): $RPC_ENDPOINTS"
+RPC_COUNT="$(awk -v endpoints="$RPC_ENDPOINTS" 'BEGIN { print split(endpoints, parts, ",") }')"
+DEVICE_LIST="MTL0"
+RPC_INDEX=0
+while [[ "$RPC_INDEX" -lt "$RPC_COUNT" ]]; do
+    DEVICE_LIST="$DEVICE_LIST,RPC$RPC_INDEX"
+    RPC_INDEX=$((RPC_INDEX + 1))
+done
+echo "llama.cpp device list: $DEVICE_LIST"
 echo
 
 # ----- Clone/update -----
@@ -292,7 +300,7 @@ echo
 COMMON_ARGS=(
     -m "$MODEL"
     --rpc "$RPC_ENDPOINTS"
-    --device MTL0
+    --device "$DEVICE_LIST"
     --gpu-layers auto
     --split-mode layer
     --ctx-size "$CONTEXT"
