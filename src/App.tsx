@@ -4,6 +4,8 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   Activity,
   Apple,
+  BarChart3,
+  Boxes,
   CheckCircle2,
   Check,
   ChevronDown,
@@ -13,6 +15,7 @@ import {
   Eraser,
   FolderOpen,
   HardDrive,
+  Layers3,
   MonitorCog,
   Network,
   Play,
@@ -82,6 +85,12 @@ type SessionEvent = {
   sessionId: string;
   status: string;
   code?: number | null;
+};
+
+type DistributionItem = {
+  label: string;
+  detail: string;
+  percent?: number;
 };
 
 const defaultOptions: LaunchOptions = {
@@ -296,6 +305,8 @@ function App() {
 
   const serverUrl = getServerUrl(options, hostInfo);
   const showServerUrl = running && options.role === "host" && options.mode === "server";
+  const distribution = useMemo(() => getLoadDistribution(logs), [logs]);
+  const activeRequirements = preview?.requirements ?? [];
 
   const copyServerUrl = async () => {
     setError(null);
@@ -310,260 +321,330 @@ function App() {
 
   return (
     <main className="app-shell">
-      <header className="topbar">
-        <div>
-          <h1>Sharrd</h1>
-        </div>
-        <div className="machine-strip">
-          <StatusPill ready={ready} label={status} />
-          <button className="secondary-button" onClick={() => setLogsOpen((open) => !open)} type="button">
-            {logsOpen ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
-            <span>{logsOpen ? "Hide logs" : "Show logs"}</span>
-          </button>
-          <div className="host-pill">
-            <MonitorCog size={16} />
-            <span>{hostInfo ? `${hostInfo.os} / ${hostInfo.arch}` : "Desktop app"}</span>
-          </div>
-        </div>
-      </header>
-
-      {showServerUrl ? (
-        <section className={ready ? "server-card running" : "server-card"}>
-          <div>
-            <p className="eyebrow">Server URL</p>
-            <strong>{serverUrl}</strong>
-          </div>
-          <div className="server-actions">
-            <button className="secondary-button" onClick={copyServerUrl} type="button">
-              {copyStatus === "copied" ? <Check size={18} /> : <Clipboard size={18} />}
-              <span>{copyStatus === "copied" ? "Copied" : "Copy"}</span>
-            </button>
-          </div>
-        </section>
-      ) : null}
-
-      <section className="workspace">
-        <aside className="control-rail">
-          <Panel title="Role" icon={Activity}>
-            <Segmented
-              items={roleOptions}
-              value={options.role}
-              onChange={(value) => updateOption("role", value)}
-            />
-          </Panel>
-
-          <Panel title="Stack" icon={HardDrive}>
-            <Segmented
-              items={stackOptions}
-              value={options.stack}
-              onChange={(value) => updateOption("stack", value)}
-            />
-          </Panel>
-
-          <Panel title="Operating system" icon={Settings2}>
-            <div className="os-grid">
-              {osOptions.map((item) => {
-                const disabled = options.stack === "apple" && item.value !== "macos";
-                return (
-                  <button
-                    className={item.value === options.targetOs ? "os-button active" : "os-button"}
-                    disabled={disabled}
-                    key={item.value}
-                    onClick={() => updateOption("targetOs", item.value)}
-                    type="button"
-                  >
-                    {item.label}
-                  </button>
-                );
-              })}
+      <div className="desktop-window">
+        <header className="titlebar">
+          <div className="brand-cluster">
+            <div className="traffic-lights" aria-label="Window controls">
+              <span />
+              <span />
+              <span />
             </div>
-          </Panel>
-
-          <Panel title="Run mode" icon={Terminal}>
-            <Segmented
-              compact
-              disabled={options.role === "worker"}
-              items={modeOptions}
-              value={options.mode}
-              onChange={(value) => updateOption("mode", value)}
-            />
-          </Panel>
-
-          <div className="action-row">
-            <button className="primary-button" disabled={!canStart} onClick={start} type="button">
-              <Play size={18} />
-              <span>{options.role === "host" ? "Start" : "Share"}</span>
-            </button>
-            <button className="stop-button" disabled={!running} onClick={stop} type="button">
-              <Square size={17} />
-              <span>Stop</span>
-            </button>
-          </div>
-        </aside>
-
-          <section className="config-panel">
-            <div className="section-heading">
-              <div>
-                <p className="eyebrow">Configuration</p>
-                <h2>{options.role === "host" ? "Start a distributed GGUF model" : "Offer this machine as a worker"}</h2>
-              </div>
-              <Shield size={22} />
+            <div className="brand-mark">
+              <Boxes size={16} />
+              <strong>Sharrd</strong>
+              <span>v0.1.0</span>
             </div>
+          </div>
 
-            {error ? <Alert message={error} /> : null}
-            {options.role === "host" && options.modelPath.trim().length === 0 ? (
-              <Alert message="A GGUF model path is required for the model starter." tone="warn" />
+          <div className="cluster-status">
+            <StatusPill ready={ready} label={status} />
+            {showServerUrl ? (
+              <>
+                <span className="status-divider" />
+                <code>{serverUrl}</code>
+              </>
             ) : null}
+          </div>
 
-            <div className="form-grid">
-              {options.role === "host" ? (
-                <Field label="GGUF model path" className="span-2">
-                  <div className="path-picker">
-                    <input
-                      placeholder={options.targetOs === "windows" ? "/c/models/model.gguf" : "/Users/me/Models/model.gguf"}
-                      value={options.modelPath}
-                      onChange={(event) => updateOption("modelPath", event.target.value)}
-                    />
-                    <button className="browse-button" onClick={chooseModelPath} title="Choose GGUF model" type="button">
-                      <FolderOpen size={18} />
-                      <span>Browse</span>
+          <div className="title-actions">
+            <button className="secondary-button" onClick={() => setLogsOpen((open) => !open)} type="button">
+              {logsOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+              <span>{logsOpen ? "Hide logs" : "Show logs"}</span>
+            </button>
+            <div className="host-pill">
+              <MonitorCog size={15} />
+              <span>{hostInfo ? `${hostInfo.os} / ${hostInfo.arch}` : "Desktop app"}</span>
+            </div>
+          </div>
+        </header>
+
+        <div className="app-body">
+          <aside className="control-rail">
+            <div className="rail-section-label">Core engine</div>
+            <Panel title="Role" icon={Activity}>
+              <Segmented
+                items={roleOptions}
+                value={options.role}
+                onChange={(value) => updateOption("role", value)}
+              />
+            </Panel>
+
+            <Panel title="Stack" icon={HardDrive}>
+              <Segmented
+                items={stackOptions}
+                value={options.stack}
+                onChange={(value) => updateOption("stack", value)}
+              />
+            </Panel>
+
+            <Panel title="Operating system" icon={Settings2}>
+              <div className="os-grid">
+                {osOptions.map((item) => {
+                  const disabled = options.stack === "apple" && item.value !== "macos";
+                  return (
+                    <button
+                      className={item.value === options.targetOs ? "os-button active" : "os-button"}
+                      disabled={disabled}
+                      key={item.value}
+                      onClick={() => updateOption("targetOs", item.value)}
+                      type="button"
+                    >
+                      {item.label}
                     </button>
-                  </div>
-                </Field>
-              ) : null}
-
-              <Field label="llama.cpp directory">
-                <input
-                  placeholder={defaultLlamaPlaceholder(options)}
-                  value={options.llamaDir}
-                  onChange={(event) => updateOption("llamaDir", event.target.value)}
-                />
-              </Field>
-
-              {options.role === "host" ? (
-                <>
-                  <Field label="Context">
-                    <input
-                      inputMode="numeric"
-                      value={options.context}
-                      onChange={(event) => updateOption("context", event.target.value)}
-                    />
-                  </Field>
-
-                  <Field label="Server bind">
-                    <input
-                      value={options.serverHost}
-                      onChange={(event) => updateOption("serverHost", event.target.value)}
-                    />
-                  </Field>
-
-                  <Field label="Server port">
-                    <input
-                      inputMode="numeric"
-                      value={options.serverPort}
-                      onChange={(event) => updateOption("serverPort", event.target.value)}
-                    />
-                  </Field>
-
-                  <Field label="Discovery seconds">
-                    <input
-                      inputMode="numeric"
-                      value={options.discoverySeconds}
-                      onChange={(event) => updateOption("discoverySeconds", event.target.value)}
-                    />
-                  </Field>
-                </>
-              ) : (
-                <Field label="RPC port">
-                  <input
-                    inputMode="numeric"
-                    value={options.rpcPort}
-                    onChange={(event) => updateOption("rpcPort", event.target.value)}
-                  />
-                </Field>
-              )}
-
-              <Field label="Discovery port">
-                <input
-                  inputMode="numeric"
-                  value={options.discoveryPort}
-                  onChange={(event) => updateOption("discoveryPort", event.target.value)}
-                />
-              </Field>
-
-              {options.stack === "nvidia" && options.role === "host" ? (
-                <Field label="Manual RPC endpoints" className="span-2">
-                  <input
-                    placeholder="192.168.1.11:50052,192.168.1.12:50052"
-                    value={options.manualRpcServers}
-                    onChange={(event) => updateOption("manualRpcServers", event.target.value)}
-                  />
-                </Field>
-              ) : null}
-            </div>
-
-            <div className="toggle-row">
-              <Toggle
-                checked={options.useCache}
-                label="RPC cache"
-                onChange={(checked) => updateOption("useCache", checked)}
-              />
-              <Toggle
-                checked={options.useAllWorkers}
-                disabled={options.role === "worker"}
-                label="Use all discovered workers"
-                onChange={(checked) => updateOption("useAllWorkers", checked)}
-              />
-            </div>
-          </section>
-
-          <section className="side-stack">
-            <section className="summary-panel">
-              <div className="section-heading compact-heading">
-                <div>
-                  <p className="eyebrow">Preset</p>
-                  <h2>{preview ? presetTitle(options) : "Not selected"}</h2>
-                </div>
-                <CheckCircle2 size={20} />
+                  );
+                })}
               </div>
+            </Panel>
 
-              <div className="requirements">
-                {preview?.requirements.map((item) => (
-                  <div className="requirement" key={item}>
-                    <CheckCircle2 size={16} />
-                    <span>{item}</span>
-                  </div>
+            <Panel title="Run mode" icon={Terminal}>
+              <Segmented
+                compact
+                disabled={options.role === "worker"}
+                items={modeOptions}
+                value={options.mode}
+                onChange={(value) => updateOption("mode", value)}
+              />
+            </Panel>
+
+            <div className="rail-status-card">
+              <span className={running ? "small-dot active" : "small-dot"} />
+              <div>
+                <strong>{running ? "Session active" : "Standing by"}</strong>
+                <span>{options.stack === "apple" ? "Bonjour / Metal RPC" : "LAN RPC discovery"}</span>
+              </div>
+            </div>
+          </aside>
+
+          <section className="workbench">
+            <div className="system-bar">
+              <div className="requirement-strip">
+                <span className="system-label">System State</span>
+                {activeRequirements.slice(0, 4).map((item) => (
+                  <span className="requirement-chip" key={item}>
+                    <CheckCircle2 size={13} />
+                    {item}
+                  </span>
                 ))}
               </div>
-            </section>
-          </section>
 
-          {logsOpen ? (
-            <section className="log-panel">
-              <div className="section-heading compact-heading">
-                <div>
-                  <p className="eyebrow">Live output</p>
-                  <h2>{logs.length ? `${logs.length} lines` : "No output yet"}</h2>
-                </div>
-                <button className="icon-button" onClick={() => setLogs([])} title="Clear logs" type="button">
-                  <Eraser size={18} />
+              <div className="action-row">
+                <button className="stop-button" disabled={!running} onClick={stop} type="button">
+                  <Square size={15} />
+                  <span>Stop</span>
+                </button>
+                <button className="primary-button" disabled={!canStart} onClick={start} type="button">
+                  <Play size={16} />
+                  <span>{options.role === "host" ? "Distribute & Run" : "Share GPU"}</span>
                 </button>
               </div>
-              <div className="log-window">
-                {logs.length === 0 ? (
-                  <p className="empty-log">Logs appear here when a session starts.</p>
-                ) : (
-                  logs.map((entry, index) => (
-                    <div className={`log-line ${entry.stream}`} key={`${entry.sessionId}-${index}`}>
-                      <span>{entry.stream}</span>
-                      <code>{entry.line}</code>
+            </div>
+
+            <div className="content-grid">
+              <section className="config-panel">
+                <div className="section-heading">
+                  <div>
+                    <p className="eyebrow">Engine configuration</p>
+                    <h2>{options.role === "host" ? "Start a distributed GGUF model" : "Offer this machine as a worker"}</h2>
+                  </div>
+                  <Shield size={21} />
+                </div>
+
+                {error ? <Alert message={error} /> : null}
+                {options.role === "host" && options.modelPath.trim().length === 0 ? (
+                  <Alert message="A GGUF model path is required for the model starter." tone="warn" />
+                ) : null}
+
+                <div className="form-grid">
+                  {options.role === "host" ? (
+                    <Field label="GGUF model path" className="span-4">
+                      <div className="path-picker">
+                        <input
+                          placeholder={options.targetOs === "windows" ? "/c/models/model.gguf" : "/Users/me/Models/model.gguf"}
+                          value={options.modelPath}
+                          onChange={(event) => updateOption("modelPath", event.target.value)}
+                        />
+                        <button className="browse-button" onClick={chooseModelPath} title="Choose GGUF model" type="button">
+                          <FolderOpen size={17} />
+                          <span>Browse</span>
+                        </button>
+                      </div>
+                    </Field>
+                  ) : null}
+
+                  <Field label="llama.cpp directory" className={options.role === "host" ? "span-2" : "span-3"}>
+                    <input
+                      placeholder={defaultLlamaPlaceholder(options)}
+                      value={options.llamaDir}
+                      onChange={(event) => updateOption("llamaDir", event.target.value)}
+                    />
+                  </Field>
+
+                  {options.role === "host" ? (
+                    <>
+                      <Field label="Context" className="span-2">
+                        <div className="field-with-actions">
+                          <input
+                            inputMode="numeric"
+                            value={options.context}
+                            onChange={(event) => updateOption("context", event.target.value)}
+                          />
+                          <div className="mini-choices">
+                            {["4096", "8192", "16384", "32768"].map((value) => (
+                              <button
+                                className={options.context === value ? "mini-choice active" : "mini-choice"}
+                                key={value}
+                                onClick={() => updateOption("context", value)}
+                                type="button"
+                              >
+                                {Number(value) / 1024}k
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </Field>
+
+                      <Field label="Server bind">
+                        <input
+                          value={options.serverHost}
+                          onChange={(event) => updateOption("serverHost", event.target.value)}
+                        />
+                      </Field>
+
+                      <Field label="Server port">
+                        <input
+                          inputMode="numeric"
+                          value={options.serverPort}
+                          onChange={(event) => updateOption("serverPort", event.target.value)}
+                        />
+                      </Field>
+
+                      <Field label="Discovery seconds">
+                        <input
+                          inputMode="numeric"
+                          value={options.discoverySeconds}
+                          onChange={(event) => updateOption("discoverySeconds", event.target.value)}
+                        />
+                      </Field>
+                    </>
+                  ) : (
+                    <Field label="RPC port">
+                      <input
+                        inputMode="numeric"
+                        value={options.rpcPort}
+                        onChange={(event) => updateOption("rpcPort", event.target.value)}
+                      />
+                    </Field>
+                  )}
+
+                  <Field label="Discovery port">
+                    <input
+                      inputMode="numeric"
+                      value={options.discoveryPort}
+                      onChange={(event) => updateOption("discoveryPort", event.target.value)}
+                    />
+                  </Field>
+
+                  {options.stack === "nvidia" && options.role === "host" ? (
+                    <Field label="Manual RPC endpoints" className="span-4">
+                      <input
+                        placeholder="192.168.1.11:50052,192.168.1.12:50052"
+                        value={options.manualRpcServers}
+                        onChange={(event) => updateOption("manualRpcServers", event.target.value)}
+                      />
+                    </Field>
+                  ) : null}
+                </div>
+
+                <div className="toggle-row">
+                  <Toggle
+                    checked={options.useCache}
+                    label="RPC memory cache"
+                    onChange={(checked) => updateOption("useCache", checked)}
+                  />
+                  <Toggle
+                    checked={options.useAllWorkers}
+                    disabled={options.role === "worker"}
+                    label="Auto-attach workers"
+                    onChange={(checked) => updateOption("useAllWorkers", checked)}
+                  />
+                </div>
+              </section>
+
+              <aside className="side-stack">
+                {showServerUrl ? (
+                  <section className={ready ? "server-card running" : "server-card"}>
+                    <div>
+                      <p className="eyebrow">Server URL</p>
+                      <strong>{serverUrl}</strong>
                     </div>
-                  ))
-                )}
-              </div>
-            </section>
-          ) : null}
-      </section>
+                    <button className="secondary-button copy-button" onClick={copyServerUrl} type="button">
+                      {copyStatus === "copied" ? <Check size={16} /> : <Clipboard size={16} />}
+                      <span>{copyStatus === "copied" ? "Copied" : "Copy"}</span>
+                    </button>
+                  </section>
+                ) : null}
+
+                {options.role === "host" ? <DistributionCard distribution={distribution} running={running} /> : null}
+
+                <section className="summary-panel">
+                  <div className="section-heading compact-heading">
+                    <div>
+                      <p className="eyebrow">Preset</p>
+                      <h2>{preview ? presetTitle(options) : "Not selected"}</h2>
+                    </div>
+                    <CheckCircle2 size={19} />
+                  </div>
+
+                  <div className="requirements">
+                    {preview?.requirements.map((item) => (
+                      <div className="requirement" key={item}>
+                        <CheckCircle2 size={15} />
+                        <span>{item}</span>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              </aside>
+            </div>
+
+            {logsOpen ? (
+              <section className="log-panel">
+                <div className="section-heading compact-heading">
+                  <div>
+                    <p className="eyebrow">Live output</p>
+                    <h2>{logs.length ? `${logs.length} lines` : "No output yet"}</h2>
+                  </div>
+                  <button className="icon-button" onClick={() => setLogs([])} title="Clear logs" type="button">
+                    <Eraser size={17} />
+                  </button>
+                </div>
+                <div className="log-window">
+                  {logs.length === 0 ? (
+                    <p className="empty-log">Logs appear here when a session starts.</p>
+                  ) : (
+                    logs.map((entry, index) => (
+                      <div className={`log-line ${entry.stream}`} key={`${entry.sessionId}-${index}`}>
+                        <span>{entry.stream}</span>
+                        <code>{entry.line}</code>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </section>
+            ) : null}
+          </section>
+        </div>
+
+        <footer className="footerbar">
+          <span>
+            <span className={running ? "small-dot active" : "small-dot"} />
+            {running ? "Engine active" : "Engine idle"}
+          </span>
+          <span>Context: {options.context || "auto"}</span>
+          <span>Discovery: UDP {options.discoveryPort || "50053"}</span>
+          <span>{options.role === "host" ? "Starter" : "Worker"}</span>
+        </footer>
+      </div>
     </main>
   );
 }
@@ -670,6 +751,43 @@ function Toggle({
   );
 }
 
+function DistributionCard({ distribution, running }: { distribution: DistributionItem[]; running: boolean }) {
+  return (
+    <section className="distribution-card">
+      <div className="section-heading compact-heading">
+        <div>
+          <p className="eyebrow">Load distribution</p>
+          <h2>llama.cpp automatic split</h2>
+        </div>
+        <BarChart3 size={19} />
+      </div>
+
+      {distribution.length > 0 ? (
+        <div className="distribution-list">
+          {distribution.map((item) => (
+            <div className="distribution-row" key={`${item.label}-${item.detail}`}>
+              <div className="distribution-copy">
+                <strong>{item.label}</strong>
+                <span>{item.detail}</span>
+              </div>
+              {typeof item.percent === "number" ? <span className="distribution-value">{item.percent}%</span> : null}
+              <div className="distribution-meter" aria-hidden="true">
+                <span style={{ width: `${Math.max(8, item.percent ?? 100)}%` }} />
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="distribution-empty">
+          <Layers3 size={22} />
+          <strong>{running ? "Waiting for split data" : "Ready to capture split"}</strong>
+          <span>{running ? "The allocation will appear when llama.cpp prints the tensor or layer split." : "Start a model to see the host and worker allocation."}</span>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function StatusPill({ label, ready }: { label: string; ready: boolean }) {
   return (
     <div className={ready ? "status-pill running" : "status-pill"}>
@@ -711,6 +829,48 @@ function isServerReadyLine(line: string) {
     normalized.includes("listening, hostname") ||
     normalized.includes("http server listening")
   );
+}
+
+function getLoadDistribution(logs: LogEvent[]): DistributionItem[] {
+  for (const entry of [...logs].reverse()) {
+    const parsed = parseDistributionLine(entry.line);
+    if (parsed.length > 0) return parsed;
+  }
+
+  const rpcLine = [...logs].reverse().find((entry) => entry.line.toLowerCase().includes("rpc worker(s):"));
+  if (!rpcLine) return [];
+
+  const endpoints = rpcLine.line
+    .replace(/^.*rpc worker\(s\):/i, "")
+    .split(",")
+    .map((endpoint) => endpoint.trim())
+    .filter(Boolean);
+
+  if (endpoints.length === 0) return [];
+
+  return [
+    { label: "Local host", detail: "Included in llama.cpp split" },
+    ...endpoints.map((endpoint, index) => ({
+      label: `Worker ${index + 1}`,
+      detail: endpoint,
+    })),
+  ];
+}
+
+function parseDistributionLine(line: string): DistributionItem[] {
+  const normalized = line.toLowerCase();
+  if (!normalized.includes("split") || (!normalized.includes("worker") && !normalized.includes("device"))) {
+    return [];
+  }
+
+  const matches = [...line.matchAll(/(?:worker|device)\s*([\w.-]+)\s*(?:->|:|=)\s*(\d+(?:\.\d+)?)\s*%/gi)];
+  if (matches.length === 0) return [];
+
+  return matches.map((match) => ({
+    label: match[1].match(/^\d+$/) ? `Worker ${Number(match[1]) + 1}` : match[1],
+    detail: "Layer allocation",
+    percent: Math.round(Number(match[2])),
+  }));
 }
 
 function presetTitle(options: LaunchOptions) {
