@@ -16,7 +16,6 @@ import {
   MonitorCog,
   Network,
   Play,
-  Radio,
   Server,
   Settings2,
   Shield,
@@ -148,6 +147,7 @@ function App() {
   const [logs, setLogs] = useState<LogEvent[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
+  const [ready, setReady] = useState(false);
   const [status, setStatus] = useState("Ready");
   const [error, setError] = useState<string | null>(null);
   const [logsOpen, setLogsOpen] = useState(false);
@@ -174,9 +174,19 @@ function App() {
     const unlisteners = Promise.all([
       listen<LogEvent>("session-log", (event) => {
         setLogs((current) => [...current.slice(-799), event.payload]);
+        if (
+          event.payload.sessionId === sessionId &&
+          options.role === "host" &&
+          options.mode === "server" &&
+          isServerReadyLine(event.payload.line)
+        ) {
+          setReady(true);
+          setStatus("Running");
+        }
       }),
       listen<SessionEvent>("session-ended", (event) => {
         setRunning(false);
+        setReady(false);
         setSessionId(null);
         const code = event.payload.code;
         setStatus(code == null ? event.payload.status : `${event.payload.status} (${code})`);
@@ -186,7 +196,7 @@ function App() {
     return () => {
       unlisteners.then((items) => items.forEach((unlisten) => unlisten()));
     };
-  }, []);
+  }, [options.mode, options.role, sessionId]);
 
   useEffect(() => {
     invoke<LaunchPreview>("build_preview", { options })
@@ -235,13 +245,17 @@ function App() {
   const start = async () => {
     setError(null);
     setStatus("Starting");
+    setReady(false);
     try {
       const id = await invoke<string>("start_session", { options });
+      const waitsForServer = options.role === "host" && options.mode === "server";
       setSessionId(id);
       setRunning(true);
-      setStatus("Running");
+      setReady(!waitsForServer);
+      setStatus(waitsForServer ? "Loading" : "Running");
     } catch (err) {
       setStatus("Ready");
+      setReady(false);
       setError(String(err));
     }
   };
@@ -274,7 +288,7 @@ function App() {
   };
 
   const serverUrl = getServerUrl(options, hostInfo);
-  const showServerUrl = options.role === "host" && options.mode === "server";
+  const showServerUrl = running && options.role === "host" && options.mode === "server";
 
   const copyServerUrl = async () => {
     setError(null);
@@ -291,11 +305,10 @@ function App() {
     <main className="app-shell">
       <header className="topbar">
         <div>
-          <p className="eyebrow">llama.cpp RPC launcher</p>
           <h1>Sharrd</h1>
         </div>
         <div className="machine-strip">
-          <StatusPill running={running} label={status} />
+          <StatusPill ready={ready} label={status} />
           <button className="secondary-button" onClick={() => setLogsOpen((open) => !open)} type="button">
             {logsOpen ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
             <span>{logsOpen ? "Hide logs" : "Show logs"}</span>
@@ -308,7 +321,7 @@ function App() {
       </header>
 
       {showServerUrl ? (
-        <section className={running ? "server-card running" : "server-card"}>
+        <section className={ready ? "server-card running" : "server-card"}>
           <div>
             <p className="eyebrow">Server URL</p>
             <strong>{serverUrl}</strong>
@@ -381,7 +394,6 @@ function App() {
           </div>
         </aside>
 
-        <section className="main-grid">
           <section className="config-panel">
             <div className="section-heading">
               <div>
@@ -513,7 +525,7 @@ function App() {
                   <p className="eyebrow">Preset</p>
                   <h2>{preview ? presetTitle(options) : "Not selected"}</h2>
                 </div>
-                <Radio size={20} />
+                <CheckCircle2 size={20} />
               </div>
 
               <div className="requirements">
@@ -522,22 +534,6 @@ function App() {
                     <CheckCircle2 size={16} />
                     <span>{item}</span>
                   </div>
-                ))}
-              </div>
-            </section>
-
-            <section className="summary-panel command-panel">
-              <div className="section-heading compact-heading">
-                <div>
-                  <p className="eyebrow">Launch preview</p>
-                  <h2>{preview?.shell ?? "Shell"}</h2>
-                </div>
-                <Terminal size={20} />
-              </div>
-              <pre>{preview?.command ?? "Select a supported preset."}</pre>
-              <div className="env-list">
-                {preview?.environment.slice(0, 8).map((item) => (
-                  <code key={item.key}>{item.key}</code>
                 ))}
               </div>
             </section>
@@ -568,7 +564,6 @@ function App() {
               </div>
             </section>
           ) : null}
-        </section>
       </section>
     </main>
   );
@@ -676,9 +671,9 @@ function Toggle({
   );
 }
 
-function StatusPill({ label, running }: { label: string; running: boolean }) {
+function StatusPill({ label, ready }: { label: string; ready: boolean }) {
   return (
-    <div className={running ? "status-pill running" : "status-pill"}>
+    <div className={ready ? "status-pill running" : "status-pill"}>
       <span />
       <strong>{label}</strong>
     </div>
@@ -703,6 +698,20 @@ function getServerUrl(options: LaunchOptions, hostInfo: HostInfo | null) {
   const bind = options.serverHost.trim();
   const host = bind === "" || bind === "0.0.0.0" || bind === "::" ? hostInfo?.networkHost || "localhost" : bind;
   return `http://${host}:${options.serverPort || "8080"}`;
+}
+
+function isServerReadyLine(line: string) {
+  const normalized = line.toLowerCase();
+  if (normalized.startsWith("llama-server:")) return false;
+  return (
+    normalized.includes("server is listening") ||
+    normalized.includes("server listening") ||
+    normalized.includes("server started") ||
+    normalized.includes("listening on") ||
+    normalized.includes("listening at") ||
+    normalized.includes("listening, hostname") ||
+    normalized.includes("http server listening")
+  );
 }
 
 function presetTitle(options: LaunchOptions) {

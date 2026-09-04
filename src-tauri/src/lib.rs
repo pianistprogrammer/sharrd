@@ -112,12 +112,25 @@ fn detect_host() -> HostInfo {
 }
 
 fn local_server_host() -> String {
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if socket.connect("8.8.8.8:80").is_ok() {
+            if let Ok(address) = socket.local_addr() {
+                let ip = address.ip().to_string();
+                if !ip.is_empty() && ip != "0.0.0.0" && ip != "127.0.0.1" {
+                    return ip;
+                }
+            }
+        }
+    }
+
     #[cfg(target_os = "macos")]
     {
-        if let Ok(output) = Command::new("scutil").args(["--get", "LocalHostName"]).output() {
-            let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !name.is_empty() {
-                return format!("{name}.local");
+        for interface in ["en0", "en1"] {
+            if let Ok(output) = Command::new("ipconfig").args(["getifaddr", interface]).output() {
+                let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !ip.is_empty() {
+                    return ip;
+                }
             }
         }
     }
