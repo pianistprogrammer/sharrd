@@ -66,6 +66,7 @@ struct HostInfo {
     arch: String,
     default_stack: String,
     default_target_os: String,
+    network_host: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -106,7 +107,38 @@ fn detect_host() -> HostInfo {
         arch,
         default_stack,
         default_target_os,
+        network_host: local_server_host(),
     }
+}
+
+fn local_server_host() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = Command::new("scutil").args(["--get", "LocalHostName"]).output() {
+            let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !name.is_empty() {
+                return format!("{name}.local");
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(name) = std::env::var("COMPUTERNAME") {
+            if !name.trim().is_empty() {
+                return name;
+            }
+        }
+    }
+
+    if let Ok(output) = Command::new("hostname").output() {
+        let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !name.is_empty() {
+            return name;
+        }
+    }
+
+    "localhost".to_string()
 }
 
 #[tauri::command]

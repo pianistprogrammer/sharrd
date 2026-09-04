@@ -145,7 +145,8 @@ h2 {
 }
 
 .status-pill,
-.host-pill {
+.host-pill,
+.secondary-button {
   align-items: center;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -172,9 +173,53 @@ h2 {
 }
 
 .status-pill strong,
-.host-pill span {
+.host-pill span,
+.secondary-button span {
   font-size: 0.86rem;
   font-weight: 800;
+}
+
+.secondary-button {
+  border-radius: 8px;
+  color: var(--text);
+  gap: 8px;
+  justify-content: center;
+  min-height: 38px;
+  padding: 0 14px;
+}
+
+.server-card {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-soft);
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  margin: 0 auto 18px;
+  max-width: 1360px;
+  padding: 14px 16px;
+}
+
+.server-card strong {
+  color: var(--text);
+  display: block;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 1rem;
+  overflow-wrap: anywhere;
+}
+
+.server-card.running {
+  border-color: var(--border-strong);
+}
+
+.server-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
 }
 
 .workspace {
@@ -238,7 +283,8 @@ h2 {
 .primary-button,
 .stop-button,
 .icon-button,
-.browse-button {
+.browse-button,
+.secondary-button {
   border: 1px solid var(--border);
   transition: border-color 120ms ease, background 120ms ease, color 120ms ease, transform 120ms ease;
 }
@@ -299,7 +345,8 @@ h2 {
 .primary-button,
 .stop-button,
 .icon-button,
-.browse-button {
+.browse-button,
+.secondary-button {
   align-items: center;
   border-radius: 8px;
   display: inline-flex;
@@ -327,7 +374,8 @@ h2 {
 }
 
 .stop-button,
-.icon-button {
+.icon-button,
+.secondary-button {
   background: var(--surface-strong);
   color: var(--text-soft);
 }
@@ -626,9 +674,20 @@ input:focus {
   }
 
   .topbar,
-  .machine-strip {
+  .machine-strip,
+  .server-card {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .server-actions {
+    justify-content: stretch;
+    width: 100%;
+  }
+
+  .server-actions .secondary-button,
+  .machine-strip .secondary-button {
+    width: 100%;
   }
 
   .control-rail,

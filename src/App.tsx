@@ -5,7 +5,12 @@ import {
   Activity,
   Apple,
   CheckCircle2,
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Clipboard,
   Cpu,
+  Eraser,
   FolderOpen,
   HardDrive,
   MonitorCog,
@@ -17,7 +22,6 @@ import {
   Shield,
   Square,
   Terminal,
-  Trash2,
   TriangleAlert,
   type LucideIcon,
 } from "lucide-react";
@@ -53,6 +57,7 @@ type HostInfo = {
   arch: string;
   defaultStack: Stack;
   defaultTargetOs: TargetOs;
+  networkHost: string;
 };
 
 type EnvVar = {
@@ -88,7 +93,7 @@ const defaultOptions: LaunchOptions = {
   llamaDir: "",
   modelPath: "",
   context: "8192",
-  serverHost: "127.0.0.1",
+  serverHost: "0.0.0.0",
   serverPort: "8080",
   rpcPort: "50052",
   discoveryPort: "50053",
@@ -145,6 +150,8 @@ function App() {
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState("Ready");
   const [error, setError] = useState<string | null>(null);
+  const [logsOpen, setLogsOpen] = useState(false);
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied">("idle");
 
   useEffect(() => {
     invoke<HostInfo>("detect_host")
@@ -155,7 +162,7 @@ function App() {
           stack: info.defaultStack,
           targetOs: info.defaultStack === "apple" ? "macos" : info.defaultTargetOs,
           context: info.defaultStack === "apple" ? "8192" : "4096",
-          serverHost: info.defaultStack === "apple" ? "127.0.0.1" : "0.0.0.0",
+          serverHost: "0.0.0.0",
         }));
       })
       .catch(() => {
@@ -207,22 +214,18 @@ function App() {
         if (value === "apple") {
           next.targetOs = "macos";
           next.context = current.context === "4096" ? "8192" : current.context;
-          next.serverHost = current.serverHost === "0.0.0.0" ? "127.0.0.1" : current.serverHost;
         } else if (current.targetOs === "macos") {
           next.targetOs = "windows";
           next.context = current.context === "8192" ? "4096" : current.context;
-          next.serverHost = current.serverHost === "127.0.0.1" ? "0.0.0.0" : current.serverHost;
         }
       }
 
       if (key === "targetOs" && value === "macos") {
         next.stack = "apple";
-        next.serverHost = current.serverHost === "0.0.0.0" ? "127.0.0.1" : current.serverHost;
       }
 
       if (key === "targetOs" && value !== "macos") {
         next.stack = "nvidia";
-        next.serverHost = current.serverHost === "127.0.0.1" ? "0.0.0.0" : current.serverHost;
       }
 
       return next;
@@ -260,7 +263,6 @@ function App() {
       const selected = await open({
         multiple: false,
         directory: false,
-        filters: [{ name: "GGUF models", extensions: ["gguf"] }],
       });
 
       if (typeof selected === "string") {
@@ -268,6 +270,20 @@ function App() {
       }
     } catch (err) {
       setError(String(err));
+    }
+  };
+
+  const serverUrl = getServerUrl(options, hostInfo);
+  const showServerUrl = options.role === "host" && options.mode === "server";
+
+  const copyServerUrl = async () => {
+    setError(null);
+    try {
+      await navigator.clipboard.writeText(serverUrl);
+      setCopyStatus("copied");
+      window.setTimeout(() => setCopyStatus("idle"), 1400);
+    } catch (err) {
+      setError(`Could not copy the server URL: ${String(err)}`);
     }
   };
 
@@ -280,12 +296,31 @@ function App() {
         </div>
         <div className="machine-strip">
           <StatusPill running={running} label={status} />
+          <button className="secondary-button" onClick={() => setLogsOpen((open) => !open)} type="button">
+            {logsOpen ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+            <span>{logsOpen ? "Hide logs" : "Show logs"}</span>
+          </button>
           <div className="host-pill">
             <MonitorCog size={16} />
             <span>{hostInfo ? `${hostInfo.os} / ${hostInfo.arch}` : "Desktop app"}</span>
           </div>
         </div>
       </header>
+
+      {showServerUrl ? (
+        <section className={running ? "server-card running" : "server-card"}>
+          <div>
+            <p className="eyebrow">Server URL</p>
+            <strong>{serverUrl}</strong>
+          </div>
+          <div className="server-actions">
+            <button className="secondary-button" onClick={copyServerUrl} type="button">
+              {copyStatus === "copied" ? <Check size={18} /> : <Clipboard size={18} />}
+              <span>{copyStatus === "copied" ? "Copied" : "Copy"}</span>
+            </button>
+          </div>
+        </section>
+      ) : null}
 
       <section className="workspace">
         <aside className="control-rail">
@@ -508,29 +543,31 @@ function App() {
             </section>
           </section>
 
-          <section className="log-panel">
-            <div className="section-heading compact-heading">
-              <div>
-                <p className="eyebrow">Live output</p>
-                <h2>{logs.length ? `${logs.length} lines` : "No output yet"}</h2>
+          {logsOpen ? (
+            <section className="log-panel">
+              <div className="section-heading compact-heading">
+                <div>
+                  <p className="eyebrow">Live output</p>
+                  <h2>{logs.length ? `${logs.length} lines` : "No output yet"}</h2>
+                </div>
+                <button className="icon-button" onClick={() => setLogs([])} title="Clear logs" type="button">
+                  <Eraser size={18} />
+                </button>
               </div>
-              <button className="icon-button" onClick={() => setLogs([])} title="Clear logs" type="button">
-                <Trash2 size={18} />
-              </button>
-            </div>
-            <div className="log-window">
-              {logs.length === 0 ? (
-                <p className="empty-log">Logs appear here when a session starts.</p>
-              ) : (
-                logs.map((entry, index) => (
-                  <div className={`log-line ${entry.stream}`} key={`${entry.sessionId}-${index}`}>
-                    <span>{entry.stream}</span>
-                    <code>{entry.line}</code>
-                  </div>
-                ))
-              )}
-            </div>
-          </section>
+              <div className="log-window">
+                {logs.length === 0 ? (
+                  <p className="empty-log">Logs appear here when a session starts.</p>
+                ) : (
+                  logs.map((entry, index) => (
+                    <div className={`log-line ${entry.stream}`} key={`${entry.sessionId}-${index}`}>
+                      <span>{entry.stream}</span>
+                      <code>{entry.line}</code>
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
+          ) : null}
         </section>
       </section>
     </main>
@@ -660,6 +697,12 @@ function Alert({ message, tone = "error" }: { message: string; tone?: "error" | 
 function defaultLlamaPlaceholder(options: LaunchOptions) {
   if (options.targetOs === "windows") return "/c/llama.cpp";
   return "$HOME/llama.cpp";
+}
+
+function getServerUrl(options: LaunchOptions, hostInfo: HostInfo | null) {
+  const bind = options.serverHost.trim();
+  const host = bind === "" || bind === "0.0.0.0" || bind === "::" ? hostInfo?.networkHost || "localhost" : bind;
+  return `http://${host}:${options.serverPort || "8080"}`;
 }
 
 function presetTitle(options: LaunchOptions) {
