@@ -307,6 +307,7 @@ function App() {
   const showServerUrl = running && options.role === "host" && options.mode === "server";
   const distribution = useMemo(() => getLoadDistribution(logs), [logs]);
   const activeRequirements = preview?.requirements ?? [];
+  const modelName = useMemo(() => getModelDisplayName(options.modelPath), [options.modelPath]);
 
   const copyServerUrl = async () => {
     setError(null);
@@ -595,6 +596,13 @@ function App() {
                     <CheckCircle2 size={19} />
                   </div>
 
+                  {options.role === "host" ? (
+                    <div className="model-chip">
+                      <span>Model</span>
+                      <strong title={options.modelPath}>{modelName}</strong>
+                    </div>
+                  ) : null}
+
                   <div className="requirements">
                     {preview?.requirements.map((item) => (
                       <div className="requirement" key={item}>
@@ -640,6 +648,9 @@ function App() {
             <span className={running ? "small-dot active" : "small-dot"} />
             {running ? "Engine active" : "Engine idle"}
           </span>
+          {options.role === "host" ? (
+            <span className="footer-model" title={options.modelPath}>Model: {modelName}</span>
+          ) : null}
           <span>Context: {options.context || "auto"}</span>
           <span>Discovery: UDP {options.discoveryPort || "50053"}</span>
           <span>{options.role === "host" ? "Starter" : "Worker"}</span>
@@ -809,6 +820,40 @@ function Alert({ message, tone = "error" }: { message: string; tone?: "error" | 
 function defaultLlamaPlaceholder(options: LaunchOptions) {
   if (options.targetOs === "windows") return "/c/llama.cpp";
   return "$HOME/llama.cpp";
+}
+
+function getModelDisplayName(modelPath: string) {
+  const trimmed = modelPath.trim();
+  if (!trimmed) return "No model selected";
+
+  const parts = trimmed
+    .replace(/\\/g, "/")
+    .split("/")
+    .filter(Boolean)
+    .map((part) => {
+      try {
+        return decodeURIComponent(part);
+      } catch {
+        return part;
+      }
+    });
+
+  const hfModelFolder = [...parts].reverse().find((part) => part.startsWith("models--"));
+  if (hfModelFolder) return hfModelFolder.replace(/^models--/, "").replace(/--/g, "/");
+
+  const ggufFile = [...parts].reverse().find((part) => part.toLowerCase().endsWith(".gguf"));
+  if (ggufFile) return cleanModelName(ggufFile);
+
+  const readablePart = [...parts].reverse().find((part) => !isHashSegment(part) && !["snapshots", "blobs", "refs"].includes(part));
+  return readablePart ? cleanModelName(readablePart) : "Selected model";
+}
+
+function cleanModelName(name: string) {
+  return name.replace(/\.(gguf|bin|safetensors)$/i, "");
+}
+
+function isHashSegment(value: string) {
+  return /^[a-f0-9]{24,}$/i.test(value) || /^[a-z0-9]{40,}$/i.test(value);
 }
 
 function getServerUrl(options: LaunchOptions, hostInfo: HostInfo | null) {

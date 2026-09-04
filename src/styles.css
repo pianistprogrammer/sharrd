@@ -855,6 +855,33 @@ input:focus {
   gap: 8px;
 }
 
+.model-chip {
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  display: grid;
+  gap: 4px;
+  margin-bottom: 12px;
+  min-width: 0;
+  padding: 10px;
+}
+
+.model-chip span {
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.model-chip strong {
+  color: var(--text);
+  font-size: 0.84rem;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .requirement {
   align-items: flex-start;
   color: var(--text-soft);
@@ -967,6 +994,13 @@ input:focus {
   gap: 7px;
   min-width: 0;
   white-space: nowrap;
+}
+
+.footerbar .footer-model {
+  display: block;
+  max-width: min(40vw, 480px);
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 @media (max-width: 1180px) {
