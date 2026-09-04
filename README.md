@@ -2,6 +2,8 @@
 
 Desktop launcher for running large GGUF models with llama.cpp RPC sharding.
 
+![Sharrd app showcase](docs/sharrd-showcase.png)
+
 ## What it wraps
 
 - Start a distributed model from the main machine.

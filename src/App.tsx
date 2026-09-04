@@ -4,7 +4,6 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   Activity,
   Apple,
-  BarChart3,
   Boxes,
   CheckCircle2,
   Check,
@@ -17,13 +16,12 @@ import {
   HardDrive,
   Layers3,
   Moon,
-  MonitorCog,
   Network,
   Play,
+  RotateCcw,
   Search,
   Server,
   Settings2,
-  Shield,
   Square,
   Sun,
   Terminal,
@@ -94,11 +92,24 @@ type DistributionItem = {
   label: string;
   detail: string;
   percent?: number;
+  exact?: boolean;
 };
 
 type WorkerNode = {
   label: string;
   endpoint: string;
+};
+
+type StageState = "pending" | "active" | "complete" | "blocked";
+
+type SystemStage = {
+  label: string;
+  detail: string;
+  state: StageState;
+};
+
+type TauriWindow = Window & {
+  __TAURI_INTERNALS__?: unknown;
 };
 
 const defaultOptions: LaunchOptions = {
@@ -172,16 +183,31 @@ function App() {
   const [ready, setReady] = useState(false);
   const [status, setStatus] = useState("Ready");
   const [error, setError] = useState<string | null>(null);
-  const [logsOpen, setLogsOpen] = useState(true);
+  const [logsOpen, setLogsOpen] = useState(false);
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied">("idle");
+  const [copyLogsStatus, setCopyLogsStatus] = useState<"idle" | "copied">("idle");
+  const [logFilter, setLogFilter] = useState("");
+  const [autoscroll, setAutoscroll] = useState(true);
   const [systemTheme, setSystemTheme] = useState<"dark" | "light">(() => getSystemTheme());
   const [themeOverride, setThemeOverride] = useState<"dark" | "light" | null>(null);
   const activeSessionRef = useRef<string | null>(null);
   const waitsForServerRef = useRef(false);
   const modelPathInputRef = useRef<HTMLInputElement | null>(null);
-  const llamaDirInputRef = useRef<HTMLInputElement | null>(null);
+  const rpcPortInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
+    if (!isTauriRuntime()) {
+      setHostInfo({
+        os: "browser",
+        arch: "preview",
+        defaultStack: "apple",
+        defaultTargetOs: "macos",
+        networkHost: "192.168.1.24",
+      });
+      setStatus("Browser preview");
+      return;
+    }
+
     invoke<HostInfo>("detect_host")
       .then((info) => {
         setHostInfo(info);
@@ -251,6 +277,12 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!isTauriRuntime()) {
+      setPreview(buildBrowserPreview(options));
+      setError(null);
+      return;
+    }
+
     invoke<LaunchPreview>("build_preview", { options })
       .then((nextPreview) => {
         setPreview(nextPreview);
@@ -296,6 +328,7 @@ function App() {
 
   const start = async () => {
     setError(null);
+    setLogs([]);
     setStatus("Starting");
     setReady(false);
     try {
@@ -325,8 +358,32 @@ function App() {
     }
   };
 
+  const restart = async () => {
+    if (!running || !sessionId) return;
+    setStatus("Restarting");
+    try {
+      await invoke("stop_session", { sessionId });
+      activeSessionRef.current = null;
+      waitsForServerRef.current = false;
+      setSessionId(null);
+      setRunning(false);
+      setReady(false);
+      window.setTimeout(() => {
+        void start();
+      }, 700);
+    } catch (err) {
+      setError(String(err));
+      setStatus("Running");
+    }
+  };
+
   const chooseModelPath = async () => {
     setError(null);
+    if (!isTauriRuntime()) {
+      updateOption("modelPath", "/Users/me/Models/Meta-Llama-3.1-70B-Instruct.Q4_K_M.gguf");
+      return;
+    }
+
     try {
       const selected = await open({
         multiple: false,
@@ -341,17 +398,35 @@ function App() {
     }
   };
 
+  const sessionLogs = useMemo(
+    () => (sessionId ? logs.filter((entry) => entry.sessionId === sessionId) : logs),
+    [logs, sessionId],
+  );
   const serverUrl = getServerUrl(options, hostInfo);
-  const showServerUrl = running && options.role === "host" && options.mode === "server";
-  const distribution = useMemo(() => getLoadDistribution(logs), [logs]);
-  const workerNodes = useMemo(() => getWorkerNodes(logs), [logs]);
+  const serverAnnounced = useMemo(() => hasLog(sessionLogs, /^llama-server:\s*http:\/\//i), [sessionLogs]);
+  const showServerUrl = options.role === "host" && options.mode === "server" && (running || ready || serverAnnounced);
+  const distribution = useMemo(() => getLoadDistribution(sessionLogs), [sessionLogs]);
+  const workerNodes = useMemo(() => getWorkerNodes(sessionLogs), [sessionLogs]);
+  const filteredLogs = useMemo(() => filterLogs(logs, logFilter), [logFilter, logs]);
+  const sessionPid = useMemo(() => getSessionPid(logs, sessionId), [logs, sessionId]);
   const activeRequirements = preview?.requirements ?? [];
+  const systemStages = useMemo(
+    () => getSystemStages(options, sessionLogs, running, ready, status, error),
+    [error, options, ready, running, sessionLogs, status],
+  );
   const modelName = useMemo(() => getModelDisplayName(options.modelPath), [options.modelPath]);
   const clusterLabel = getClusterLabel(options, running, workerNodes.length);
   const theme = themeOverride ?? systemTheme;
 
+  useEffect(() => {
+    if (serverAnnounced && running && waitsForServerRef.current && !ready) {
+      setReady(true);
+      setStatus("Running");
+    }
+  }, [ready, running, serverAnnounced]);
+
   const focusPrimaryInput = () => {
-    const input = options.role === "host" ? modelPathInputRef.current : llamaDirInputRef.current;
+    const input = options.role === "host" ? modelPathInputRef.current : rpcPortInputRef.current;
     input?.focus();
     input?.select();
   };
@@ -367,16 +442,22 @@ function App() {
     }
   };
 
+  const copyLogs = async () => {
+    setError(null);
+    try {
+      await navigator.clipboard.writeText(logs.map((entry) => `${entry.stream.toUpperCase()} ${entry.line}`).join("\n"));
+      setCopyLogsStatus("copied");
+      window.setTimeout(() => setCopyLogsStatus("idle"), 1400);
+    } catch (err) {
+      setError(`Could not copy logs: ${String(err)}`);
+    }
+  };
+
   return (
     <main className={theme === "light" ? "app-shell light-theme" : "app-shell"}>
       <div className="desktop-window">
         <header className="titlebar">
           <div className="brand-cluster">
-            <div className="traffic-lights" aria-label="Window controls">
-              <span />
-              <span />
-              <span />
-            </div>
             <div className="brand-mark">
               <Boxes size={16} />
               <strong>Sharrd</strong>
@@ -390,10 +471,13 @@ function App() {
               <>
                 <span className="status-divider" />
                 <code>{serverUrl}</code>
+                <button className="cluster-copy-button" onClick={copyServerUrl} type="button">
+                  {copyStatus === "copied" ? <Check size={13} /> : <Clipboard size={13} />}
+                  <span>{copyStatus === "copied" ? "Copied" : "Copy"}</span>
+                </button>
               </>
             ) : null}
-            <span className="status-divider" />
-            <strong className="cluster-copy">{clusterLabel}</strong>
+            {!showServerUrl ? <strong className="cluster-copy">{clusterLabel}</strong> : null}
           </div>
 
           <div className="title-actions">
@@ -401,10 +485,6 @@ function App() {
               <Search size={14} />
               <span>Quick Find</span>
               <kbd>⌘K</kbd>
-            </button>
-            <button className="secondary-button" onClick={() => setLogsOpen((open) => !open)} type="button">
-              {logsOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-              <span>{logsOpen ? "Hide logs" : "Show logs"}</span>
             </button>
             <button
               aria-label="Toggle color theme"
@@ -414,10 +494,6 @@ function App() {
             >
               {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
             </button>
-            <div className="host-pill">
-              <MonitorCog size={15} />
-              <span>{hostInfo ? `${hostInfo.os} / ${hostInfo.arch}` : "Desktop app"}</span>
-            </div>
           </div>
         </header>
 
@@ -515,34 +591,38 @@ function App() {
             <div className="system-bar">
               <div className="requirement-strip">
                 <span className="system-label">System State</span>
-                {activeRequirements.slice(0, 4).map((item) => (
-                  <span className="requirement-chip" key={item}>
-                    <CheckCircle2 size={13} />
-                    {item}
-                  </span>
+                {systemStages.map((stage) => (
+                  <StageChip key={stage.label} stage={stage} />
                 ))}
               </div>
 
               <div className="action-row">
-                <button className="stop-button" disabled={!running} onClick={stop} type="button">
-                  <Square size={15} />
-                  <span>Stop</span>
+                <button className="icon-button restart-button" disabled={!running} onClick={restart} title="Restart cluster pipeline" type="button">
+                  <RotateCcw size={15} />
                 </button>
-                <button className="primary-button" disabled={!canStart} onClick={start} type="button">
-                  <Play size={16} />
-                  <span>{options.role === "host" ? "Distribute & Run" : "Share GPU"}</span>
-                </button>
+                {running ? (
+                  <button className="stop-button primary-stop-button" onClick={stop} type="button">
+                    <Square size={15} />
+                    <span>Stop Engine</span>
+                  </button>
+                ) : (
+                  <button className="primary-button" disabled={!canStart} onClick={start} type="button">
+                    <Play size={16} />
+                    <span>{options.role === "host" ? "Distribute & Run" : "Share GPU"}</span>
+                  </button>
+                )}
               </div>
             </div>
 
             <div className="content-grid">
+              <div className="main-stack">
               <section className="config-panel">
                 <div className="section-heading">
                   <div>
-                    <p className="eyebrow">Engine configuration</p>
+                    <p className="eyebrow">Engine Configuration & Topology</p>
                     <h2>{options.role === "host" ? "Start a distributed GGUF model" : "Offer this machine as a worker"}</h2>
                   </div>
-                  <Shield size={21} />
+                  <span className="card-meta">llama.cpp cluster-native RPC</span>
                 </div>
 
                 {error ? <Alert message={error} /> : null}
@@ -567,15 +647,6 @@ function App() {
                       </div>
                     </Field>
                   ) : null}
-
-                  <Field label="llama.cpp directory" className={options.role === "host" ? "span-2" : "span-3"}>
-                    <input
-                      ref={llamaDirInputRef}
-                      placeholder={defaultLlamaPlaceholder(options)}
-                      value={options.llamaDir}
-                      onChange={(event) => updateOption("llamaDir", event.target.value)}
-                    />
-                  </Field>
 
                   {options.role === "host" ? (
                     <>
@@ -625,8 +696,9 @@ function App() {
                       </Field>
                     </>
                   ) : (
-                    <Field label="RPC port">
+                    <Field label="RPC port" className="span-2">
                       <input
+                        ref={rpcPortInputRef}
                         inputMode="numeric"
                         value={options.rpcPort}
                         onChange={(event) => updateOption("rpcPort", event.target.value)}
@@ -634,7 +706,7 @@ function App() {
                     </Field>
                   )}
 
-                  <Field label="Discovery port">
+                  <Field label="Discovery Port (RPC)" className={options.role === "worker" ? "span-2" : undefined}>
                     <input
                       inputMode="numeric"
                       value={options.discoveryPort}
@@ -654,36 +726,36 @@ function App() {
                 </div>
 
                 <div className="toggle-row">
-                  <Toggle
-                    checked={options.useCache}
-                    label="RPC memory cache"
-                    onChange={(checked) => updateOption("useCache", checked)}
-                  />
-                  <Toggle
-                    checked={options.useAllWorkers}
-                    disabled={options.role === "worker"}
-                    label="Auto-attach workers"
-                    onChange={(checked) => updateOption("useAllWorkers", checked)}
-                  />
+                  <div className="toggle-controls">
+                    <Toggle
+                      checked={options.useCache}
+                      label="RPC Memory Cache"
+                      onChange={(checked) => updateOption("useCache", checked)}
+                    />
+                    <Toggle
+                      checked={options.useAllWorkers}
+                      disabled={options.role === "worker"}
+                      label="Auto-attach all discovered LAN workers"
+                      onChange={(checked) => updateOption("useAllWorkers", checked)}
+                    />
+                  </div>
+                  <div className="allocation-summary">
+                    Active RPC workers: <strong>{workerNodes.length}</strong>
+                  </div>
                 </div>
+
+                {options.role === "host" ? (
+                  <DistributionCard
+                    distribution={distribution}
+                    modelPath={options.modelPath}
+                    running={running}
+                  />
+                ) : null}
               </section>
 
+              </div>
+
               <aside className="side-stack">
-                {showServerUrl ? (
-                  <section className={ready ? "server-card running" : "server-card"}>
-                    <div>
-                      <p className="eyebrow">Server URL</p>
-                      <strong>{serverUrl}</strong>
-                    </div>
-                    <button className="secondary-button copy-button" onClick={copyServerUrl} type="button">
-                      {copyStatus === "copied" ? <Check size={16} /> : <Clipboard size={16} />}
-                      <span>{copyStatus === "copied" ? "Copied" : "Copy"}</span>
-                    </button>
-                  </section>
-                ) : null}
-
-                {options.role === "host" ? <DistributionCard distribution={distribution} running={running} /> : null}
-
                 <section className="summary-panel">
                   <div className="section-heading compact-heading">
                     <div>
@@ -709,25 +781,48 @@ function App() {
                     ))}
                   </div>
                 </section>
+
               </aside>
             </div>
 
             {logsOpen ? (
               <section className="log-panel">
-                <div className="section-heading compact-heading">
-                  <div>
-                    <p className="eyebrow">Live output</p>
-                    <h2>{logs.length ? `${logs.length} lines` : "No output yet"}</h2>
+                <div className="terminal-toolbar">
+                  <div className="terminal-title-row">
+                    <span className={ready ? "small-dot active" : "small-dot"} />
+                    <strong>Live Output</strong>
+                    <span className="line-counter">{filteredLogs.length} lines</span>
+                    {sessionPid ? <span className="pid-label">Process ID: {sessionPid}</span> : null}
                   </div>
-                  <button className="icon-button" onClick={() => setLogs([])} title="Clear logs" type="button">
-                    <Eraser size={17} />
-                  </button>
+                  <div className="terminal-actions">
+                    <label className="log-filter">
+                      <Search size={14} />
+                      <input
+                        placeholder="Filter stream logs..."
+                        value={logFilter}
+                        onChange={(event) => setLogFilter(event.target.value)}
+                      />
+                    </label>
+                    <button className={autoscroll ? "terminal-button active" : "terminal-button"} onClick={() => setAutoscroll((value) => !value)} title="Autoscroll logs" type="button">
+                      <ChevronDown size={13} />
+                      <span>Auto</span>
+                    </button>
+                    <button className="icon-button" onClick={copyLogs} title="Copy raw logs" type="button">
+                      {copyLogsStatus === "copied" ? <Check size={17} /> : <Clipboard size={17} />}
+                    </button>
+                    <button className="icon-button" onClick={() => setLogs([])} title="Clear logs" type="button">
+                      <Eraser size={17} />
+                    </button>
+                    <button className="icon-button" onClick={() => setLogsOpen(false)} title="Hide logs" type="button">
+                      <ChevronUp size={17} />
+                    </button>
+                  </div>
                 </div>
-                <div className="log-window">
-                  {logs.length === 0 ? (
+                <div className={autoscroll ? "log-window autoscroll" : "log-window"}>
+                  {filteredLogs.length === 0 ? (
                     <p className="empty-log">Logs appear here when a session starts.</p>
                   ) : (
-                    logs.map((entry, index) => (
+                    filteredLogs.map((entry, index) => (
                       <div className={`log-line ${entry.stream}`} key={`${entry.sessionId}-${index}`}>
                         <span>{entry.stream}</span>
                         <code>{entry.line}</code>
@@ -736,21 +831,34 @@ function App() {
                   )}
                 </div>
               </section>
-            ) : null}
+            ) : (
+              <button className="show-log-strip" onClick={() => setLogsOpen(true)} type="button">
+                <Terminal size={16} />
+                <span>Show Live Output</span>
+                <ChevronDown size={16} />
+              </button>
+            )}
           </section>
         </div>
 
         <footer className="footerbar">
-          <span>
-            <span className={running ? "small-dot active" : "small-dot"} />
-            {running ? "Engine active" : "Engine idle"}
-          </span>
-          {options.role === "host" ? (
-            <span className="footer-model" title={options.modelPath}>Model: {modelName}</span>
-          ) : null}
-          <span>Context: {options.context || "auto"}</span>
-          <span>Discovery: UDP {options.discoveryPort || "50053"}</span>
-          <span>{options.role === "host" ? "Starter" : "Worker"}</span>
+          <div>
+            <span>
+              <span className={running ? "small-dot active" : "small-dot"} />
+              <strong>{running ? "Engine Active" : "Engine Idle"}</strong>
+            </span>
+            {options.role === "host" ? (
+              <span className="footer-model" title={options.modelPath}>Model: {modelName}</span>
+            ) : null}
+            <span>Context: <strong>{options.context || "auto"} ctx</strong></span>
+          </div>
+          <div>
+            <span>Workers: <strong>{workerNodes.length}</strong></span>
+            <span className="footer-separator">|</span>
+            <span>Discovery: <strong>UDP:{options.discoveryPort || "50053"}</strong></span>
+            <span className="footer-separator">|</span>
+            <span>Host: <strong>{hostInfo ? `${hostInfo.os} ${hostInfo.arch}` : "Detecting"}</strong></span>
+          </div>
         </footer>
       </div>
     </main>
@@ -859,39 +967,75 @@ function Toggle({
   );
 }
 
-function DistributionCard({ distribution, running }: { distribution: DistributionItem[]; running: boolean }) {
+function DistributionCard({
+  distribution,
+  modelPath,
+  running,
+}: {
+  distribution: DistributionItem[];
+  modelPath: string;
+  running: boolean;
+}) {
+  const segments = getTopologySegments(distribution);
+  const hasTopology = segments.length > 0;
+  const exactSplit = distribution.some((item) => item.exact);
+
   return (
-    <section className="distribution-card">
-      <div className="section-heading compact-heading">
-        <div>
-          <p className="eyebrow">Load distribution</p>
-          <h2>llama.cpp automatic split</h2>
+    <section className="topology-card">
+      <div className="topology-header">
+        <div className="topology-title">
+          <Layers3 size={19} />
+          <span>Model Sharding Topology</span>
         </div>
-        <BarChart3 size={19} />
+        <span className="topology-format">{getQuantizationLabel(modelPath)}</span>
       </div>
 
-      {distribution.length > 0 ? (
-        <div className="distribution-list">
-          {distribution.map((item) => (
-            <div className="distribution-row" key={`${item.label}-${item.detail}`}>
-              <div className="distribution-copy">
-                <strong>{item.label}</strong>
-                <span>{item.detail}</span>
-              </div>
-              {typeof item.percent === "number" ? <span className="distribution-value">{item.percent}%</span> : null}
-              <div className="distribution-meter" aria-hidden="true">
-                <span style={{ width: `${Math.max(8, item.percent ?? 100)}%` }} />
-              </div>
+      <div className="topology-balance-row">
+        <span>Distributed Layer Balance</span>
+        <strong>{exactSplit ? "llama.cpp Split Detected" : hasTopology ? "Workers Connected" : running ? "Awaiting Layer Split" : "Ready To Capture Split"}</strong>
+      </div>
+
+      <div className={hasTopology ? "topology-balance-bar" : "topology-balance-bar pending"} aria-hidden="true">
+        {hasTopology ? (
+          segments.map((segment) => (
+            <span
+              className={`topology-segment ${segment.tone}`}
+              key={`${segment.label}-${segment.detail}`}
+              style={{ width: `${segment.percent}%` }}
+            />
+          ))
+        ) : null}
+      </div>
+
+      {hasTopology ? (
+        <div className="topology-segment-labels">
+          {segments.map((segment) => (
+            <div key={`${segment.label}-${segment.detail}-label`} style={{ width: `${segment.percent}%` }}>
+              <strong>{segment.label}</strong>
+              <span>{segment.detail}</span>
             </div>
           ))}
         </div>
-      ) : (
-        <div className="distribution-empty">
-          <Layers3 size={22} />
-          <strong>{running ? "Waiting for split data" : "Ready to capture split"}</strong>
-          <span>{running ? "The allocation will appear when llama.cpp prints the tensor or layer split." : "Start a model to see the host and worker allocation."}</span>
-        </div>
-      )}
+      ) : null}
+
+      <div className="topology-legend">
+        {hasTopology ? (
+          segments.map((segment) => (
+            <span key={`${segment.label}-${segment.percent}`}>
+              <i className={segment.tone} />
+              {segment.label} {segment.detail ? `(${segment.detail})` : null}
+            </span>
+          ))
+        ) : (
+          <span>
+            <i className="lavender" />
+            {running ? "Waiting for worker discovery and llama.cpp allocation output" : "Start the model to capture host and worker shards"}
+          </span>
+        )}
+      </div>
+      {hasTopology && !exactSplit ? (
+        <p className="topology-note">Connected workers are shown now. Exact layer percentages appear only if llama.cpp prints split details during model load.</p>
+      ) : null}
     </section>
   );
 }
@@ -905,6 +1049,18 @@ function StatusPill({ label, ready }: { label: string; ready: boolean }) {
   );
 }
 
+function StageChip({ stage }: { stage: SystemStage }) {
+  return (
+    <span className={`stage-chip ${stage.state}`} title={stage.detail}>
+      {stage.state === "complete" ? <CheckCircle2 size={13} /> : null}
+      {stage.state === "blocked" ? <TriangleAlert size={13} /> : null}
+      {stage.state === "active" ? <span className="stage-spinner" /> : null}
+      {stage.state === "pending" ? <span className="stage-dot" /> : null}
+      <span>{stage.label}</span>
+    </span>
+  );
+}
+
 function Alert({ message, tone = "error" }: { message: string; tone?: "error" | "warn" }) {
   return (
     <div className={tone === "warn" ? "alert warn" : "alert"}>
@@ -914,9 +1070,110 @@ function Alert({ message, tone = "error" }: { message: string; tone?: "error" | 
   );
 }
 
-function defaultLlamaPlaceholder(options: LaunchOptions) {
-  if (options.targetOs === "windows") return "/c/llama.cpp";
-  return "$HOME/llama.cpp";
+function isTauriRuntime() {
+  return typeof window !== "undefined" && Boolean((window as TauriWindow).__TAURI_INTERNALS__);
+}
+
+function buildBrowserPreview(options: LaunchOptions): LaunchPreview {
+  const os = options.targetOs === "macos" ? "macOS" : options.targetOs === "windows" ? "Windows" : "Linux";
+  const stack = options.stack === "apple" ? "Apple Silicon / Metal" : "NVIDIA CUDA";
+  const script = `${options.role === "host" ? "start" : "share"}-${os.toLowerCase()}-${options.stack}`;
+
+  return {
+    shell: options.targetOs === "windows" ? "Git Bash" : "/bin/bash",
+    command: `${script} ${options.role === "host" ? "--model <selected.gguf>" : "--rpc-port " + options.rpcPort}`,
+    environment: [],
+    requirements: [stack, "llama.cpp", options.role === "host" ? "GGUF model file" : "RPC worker mode", "LAN discovery"],
+    notes: ["Browser design preview only; launch commands run inside the desktop app."],
+  };
+}
+
+function getSystemStages(
+  options: LaunchOptions,
+  logs: LogEvent[],
+  running: boolean,
+  ready: boolean,
+  status: string,
+  error: string | null,
+): SystemStage[] {
+  const serverReady = hasLog(logs, (line) => isServerReadyLine(line));
+  const blocked = !serverReady && (Boolean(error) || /\b(error|failed|abort|exited \([1-9])/i.test(status) || hasLog(logs, isFatalLogLine));
+  const started = running || logs.length > 0;
+
+  const definitions = options.role === "host"
+    ? [
+        { label: "Discover workers", detail: "Find reachable llama.cpp RPC workers on the LAN." },
+        { label: "Prepare llama.cpp", detail: "Clone, update, and build llama.cpp with the selected backend." },
+        { label: "Check model", detail: "Validate the selected GGUF model before launch." },
+        { label: "Serve model", detail: "Start llama-server and wait until it is ready for requests." },
+      ]
+    : [
+        { label: "Prepare worker", detail: "Check local GPU, tools, and llama.cpp workspace." },
+        { label: "Build RPC backend", detail: "Compile llama.cpp with RPC and the selected GPU backend." },
+        { label: "Advertise on LAN", detail: "Publish this machine so model starters can discover it." },
+        { label: "RPC online", detail: "Start the RPC server and listen for distributed inference work." },
+      ];
+
+  const completeFlags = options.role === "host"
+    ? [
+        ready || serverReady || hasLog(logs, /rpc worker\(s\):|using manual rpc endpoint|\[2\/|\[3\/|\[4\/|\[5\/|\[6\//i),
+        ready || serverReady || hasLog(logs, /\[4\/|\[5\/|\[6\/|checking model|model\s*:/i),
+        ready || serverReady || hasLog(logs, /\[5\/|\[6\/|starting distributed inference|llama-server:/i),
+        ready || serverReady || (options.mode === "cli" && running && hasLog(logs, /starting distributed inference/i)),
+      ]
+    : [
+        hasLog(logs, /\[2\/|\[3\/|\[4\/|\[5\/|building .*rpc|cloning\/updating llama\.cpp/i),
+        hasLog(logs, /\[3\/4\]|\[4\/5\]|advertising this worker|starting automatic discovery responder|starting rpc worker/i),
+        hasLog(logs, /\[4\/4\]|\[5\/5\]|starting rpc worker|rpc endpoint/i),
+        hasLog(logs, /this .* sharing .* gpu|rpc endpoint\s*:|use only on a trusted lan|starting rpc worker/i),
+      ];
+
+  const firstIncomplete = completeFlags.findIndex((complete) => !complete);
+  const activeIndex = firstIncomplete === -1 ? definitions.length - 1 : firstIncomplete;
+
+  return definitions.map((stage, index) => {
+    let state: StageState = "pending";
+    if (completeFlags[index]) state = "complete";
+    if (started && !completeFlags[index] && index === activeIndex) state = "active";
+    if (blocked && !completeFlags[index] && index === activeIndex) state = "blocked";
+    if (!started && index === 0) state = "pending";
+    if (ready && index === definitions.length - 1) state = "complete";
+
+    return { ...stage, state };
+  });
+}
+
+function hasLog(logs: LogEvent[], pattern: RegExp | ((line: string) => boolean)) {
+  if (pattern instanceof RegExp) return logs.some((entry) => pattern.test(entry.line));
+  return logs.some((entry) => pattern(entry.line));
+}
+
+function isFatalLogLine(line: string) {
+  const normalized = line.toLowerCase();
+  if (normalized.includes("cors is set") || normalized.includes("security risk") || normalized.includes("more info:")) return false;
+  return /\b(error|failed|abort|fatal)\b/.test(normalized);
+}
+
+function getTopologySegments(distribution: DistributionItem[]) {
+  const items = distribution.filter((item) => item.label.trim().length > 0);
+  if (items.length === 0) return [];
+
+  const fallbackPercent = 100 / items.length;
+  const total = items.reduce((sum, item) => sum + (item.percent ?? fallbackPercent), 0) || 100;
+  const tones = ["lavender", "green", "amber", "cyan"];
+
+  return items.map((item, index) => ({
+    label: item.label,
+    detail: item.detail,
+    percent: Math.max(5, Math.round(((item.percent ?? fallbackPercent) / total) * 100)),
+    tone: tones[index % tones.length],
+  }));
+}
+
+function getQuantizationLabel(value: string) {
+  const match = value.match(/\bQ(\d)(?:_|-|\b)/i);
+  if (match) return `${match[1]}-bit Quantized (GGUF)`;
+  return "GGUF Shard Plan";
 }
 
 function getModelDisplayName(modelPath: string) {
@@ -961,8 +1218,8 @@ function getServerUrl(options: LaunchOptions, hostInfo: HostInfo | null) {
 
 function isServerReadyLine(line: string) {
   const normalized = line.toLowerCase();
-  if (normalized.startsWith("llama-server:")) return false;
   return (
+    normalized.startsWith("llama-server: http://") ||
     normalized.includes("server is listening") ||
     normalized.includes("server listening") ||
     normalized.includes("server started") ||
@@ -991,7 +1248,7 @@ function getLoadDistribution(logs: LogEvent[]): DistributionItem[] {
   if (endpoints.length === 0) return [];
 
   return [
-    { label: "Local host", detail: "Included in llama.cpp split" },
+    { label: "Host", detail: "auto" },
     ...endpoints.map((endpoint, index) => ({
       label: `Worker ${index + 1}`,
       detail: endpoint,
@@ -1014,6 +1271,20 @@ function getWorkerNodes(logs: LogEvent[]): WorkerNode[] {
     }));
 }
 
+function filterLogs(logs: LogEvent[], filter: string) {
+  const query = filter.trim().toLowerCase();
+  if (!query) return logs;
+  return logs.filter((entry) => `${entry.stream} ${entry.line}`.toLowerCase().includes(query));
+}
+
+function getSessionPid(logs: LogEvent[], sessionId: string | null) {
+  if (!sessionId) return null;
+  const startLine = logs.find(
+    (entry) => entry.sessionId === sessionId && entry.stream === "system" && entry.line.startsWith("Started session as process "),
+  );
+  return startLine?.line.match(/process\s+(\d+)/)?.[1] ?? null;
+}
+
 function getClusterLabel(options: LaunchOptions, running: boolean, workerCount: number) {
   if (!running) return "Ready for local cluster";
   if (options.role === "worker") return "RPC worker online";
@@ -1034,6 +1305,7 @@ function parseDistributionLine(line: string): DistributionItem[] {
     label: match[1].match(/^\d+$/) ? `Worker ${Number(match[1]) + 1}` : match[1],
     detail: "Layer allocation",
     percent: Math.round(Number(match[2])),
+    exact: true,
   }));
 }
 

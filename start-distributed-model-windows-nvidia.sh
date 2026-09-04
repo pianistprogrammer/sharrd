@@ -41,6 +41,19 @@ need_cmd() {
     fi
 }
 
+model_alias_from_path() {
+    local path="$1"
+    local alias
+
+    alias="$(printf '%s\n' "$path" | sed -nE 's#.*models--([^/]+)/.*#\1#p' | head -n 1)"
+    if [[ -n "$alias" ]]; then
+        printf '%s\n' "${alias//--//}"
+        return 0
+    fi
+
+    basename "$path" | sed -E 's/\.[Gg][Gg][Uu][Ff]$//'
+}
+
 need_cmd git
 need_cmd cmake
 need_cmd powershell.exe
@@ -226,6 +239,9 @@ echo "  and RPC GPUs according to AVAILABLE device memory."
 echo "  --fit is left enabled (the default) so runtime settings can"
 echo "  be adjusted to fit device memory."
 echo
+MODEL_ALIAS="${MODEL_ALIAS:-$(model_alias_from_path "$MODEL")}"
+echo "Model name: $MODEL_ALIAS"
+echo
 
 COMMON_ARGS=(
     -m "$MODEL"
@@ -243,6 +259,8 @@ else
     echo
     exec "$APP" \
         "${COMMON_ARGS[@]}" \
+        --alias "$MODEL_ALIAS" \
+        --cors-origins localhost \
         --host "$SERVER_BIND" \
         --port "$SERVER_PORT"
 fi

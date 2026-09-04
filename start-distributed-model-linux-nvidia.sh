@@ -34,6 +34,19 @@ need_cmd() {
     fi
 }
 
+model_alias_from_path() {
+    local path="$1"
+    local alias
+
+    alias="$(printf '%s\n' "$path" | sed -nE 's#.*models--([^/]+)/.*#\1#p' | head -n 1)"
+    if [[ -n "$alias" ]]; then
+        printf '%s\n' "${alias//--//}"
+        return 0
+    fi
+
+    basename "$path" | sed -E 's/\.[Gg][Gg][Uu][Ff]$//'
+}
+
 echo "============================================================"
 echo " llama.cpp MAIN/JOINER - Linux CUDA + RPC"
 echo "============================================================"
@@ -167,6 +180,9 @@ fi
 echo "[6/6] Starting distributed inference"
 echo "Using RPC endpoint(s): $RPC_LIST"
 echo
+MODEL_ALIAS="${MODEL_ALIAS:-$(model_alias_from_path "$MODEL")}"
+echo "Model name: $MODEL_ALIAS"
+echo
 
 COMMON_ARGS=(
     -m "$MODEL"
@@ -184,6 +200,8 @@ else
     echo
     exec "$APP" \
         "${COMMON_ARGS[@]}" \
+        --alias "$MODEL_ALIAS" \
+        --cors-origins localhost \
         --host "$SERVER_BIND" \
         --port "$SERVER_PORT"
 fi

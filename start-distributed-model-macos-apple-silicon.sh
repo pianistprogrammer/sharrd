@@ -39,6 +39,19 @@ MODE="${MODE:-server}"       # server or cli
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
+model_alias_from_path() {
+    local path="$1"
+    local alias
+
+    alias="$(printf '%s\n' "$path" | sed -nE 's#.*models--([^/]+)/.*#\1#p' | head -n 1)"
+    if [[ -n "$alias" ]]; then
+        printf '%s\n' "${alias//--//}"
+        return 0
+    fi
+
+    basename "$path" | sed -E 's/\.[Gg][Gg][Uu][Ff]$//'
+}
+
 [[ "$(uname -s)" == "Darwin" ]] || die "This script is macOS-only."
 [[ "$(uname -m)" == "arm64" ]] || die "Apple Silicon (arm64) is required."
 
@@ -282,6 +295,8 @@ MODEL_SIZE_BYTES="$(stat -f%z "$MODEL")"
 MODEL_SIZE_GIB="$(awk -v b="$MODEL_SIZE_BYTES" 'BEGIN { printf "%.2f", b/1024/1024/1024 }')"
 
 echo "Model     : $MODEL"
+MODEL_ALIAS="${MODEL_ALIAS:-$(model_alias_from_path "$MODEL")}"
+echo "Model name: $MODEL_ALIAS"
 echo "GGUF size : ${MODEL_SIZE_GIB} GiB"
 echo "Context   : $CONTEXT"
 echo
@@ -315,6 +330,8 @@ else
     echo
     exec "$SERVER_EXE" \
         "${COMMON_ARGS[@]}" \
+        --alias "$MODEL_ALIAS" \
+        --cors-origins localhost \
         --host "$SERVER_HOST" \
         --port "$SERVER_PORT"
 fi
