@@ -13,8 +13,8 @@ set -euo pipefail
 #   - discovers worker Macs automatically via Bonjour/mDNS
 #   - detects local chip / unified memory
 #   - builds llama.cpp with Metal + RPC
-#   - lets llama.cpp distribute the model based on available
-#     local/remote Metal memory
+#   - uses a memory-weighted split so larger Macs carry more
+#     of the model than smaller worker Macs
 #   - starts llama-server
 #
 # Model path can be passed as the first argument:
@@ -189,6 +189,7 @@ echo
 
 # Resolve each Bonjour service to host + port.
 RPC_ENDPOINTS=""
+WORKER_RAM_GIBS=""
 while IFS= read -r svc; do
     [[ -n "$svc" ]] || continue
     RESOLVE_LOG="$(mktemp -t llama-rpc-resolve.XXXXXX)"
@@ -215,6 +216,7 @@ while IFS= read -r svc; do
           }
         ' "$RESOLVE_LOG"
     )"
+    WORKER_RAM_GIB="$(grep -Eo 'ram_gib=[0-9]+' "$RESOLVE_LOG" | head -n 1 | cut -d= -f2 || true)"
 
     rm -f "$RESOLVE_LOG"
 
@@ -235,10 +237,16 @@ while IFS= read -r svc; do
 
         echo "Checking RPC TCP connection to $ENDPOINT..."
         if wait_for_tcp "$ENDPOINT_HOST" "$TARGET_PORT" "$ENDPOINT"; then
+            if [[ ! "$WORKER_RAM_GIB" =~ ^[0-9]+$ ]]; then
+                WORKER_RAM_GIB="16"
+            fi
+
             if [[ -z "$RPC_ENDPOINTS" ]]; then
                 RPC_ENDPOINTS="$ENDPOINT"
+                WORKER_RAM_GIBS="$WORKER_RAM_GIB"
             else
                 RPC_ENDPOINTS="$RPC_ENDPOINTS,$ENDPOINT"
+                WORKER_RAM_GIBS="$WORKER_RAM_GIBS,$WORKER_RAM_GIB"
             fi
         else
             echo "WARNING: $ENDPOINT was discovered by Bonjour but did not accept TCP connections on port $TARGET_PORT. Skipping it."
@@ -258,6 +266,20 @@ while [[ "$RPC_INDEX" -lt "$RPC_COUNT" ]]; do
     RPC_INDEX=$((RPC_INDEX + 1))
 done
 echo "llama.cpp device list: $DEVICE_LIST"
+TENSOR_SPLIT="${TENSOR_SPLIT:-$MEM_GIB${WORKER_RAM_GIBS:+,$WORKER_RAM_GIBS}}"
+echo "llama.cpp tensor split: $TENSOR_SPLIT"
+awk -v split_spec="$TENSOR_SPLIT" '
+    BEGIN {
+        n = split(split_spec, parts, ",")
+        total = 0
+        for (i = 1; i <= n; i++) total += parts[i]
+        if (total <= 0) exit
+        for (i = 1; i <= n; i++) {
+            label = (i == 1) ? "Host" : "Worker" (i - 1)
+            printf "Split device %s: %.0f%%\n", label, (parts[i] / total) * 100
+        }
+    }
+'
 echo
 
 # ----- Clone/update -----
@@ -312,9 +334,9 @@ echo
 # ----- Run -----
 echo "[5/5] Starting distributed inference"
 echo
-echo "Allocation is automatic:"
+echo "Allocation is memory-weighted:"
 echo "  local Metal GPU + discovered RPC Metal GPU(s)"
-echo "  llama.cpp splits layers/KV according to available device memory."
+echo "  larger Macs receive a larger layer/KV share via --tensor-split."
 echo
 echo "Using --load-mode none to avoid the current Metal+RPC mmap"
 echo "memory-retention issue when splitting models across Macs."
@@ -326,6 +348,7 @@ COMMON_ARGS=(
     --device "$DEVICE_LIST"
     --gpu-layers auto
     --split-mode layer
+    --tensor-split "$TENSOR_SPLIT"
     --ctx-size "$CONTEXT"
     --fit on
     --load-mode none

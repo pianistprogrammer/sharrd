@@ -8,7 +8,8 @@ set -euo pipefail
 #   - Detects local NVIDIA GPU(s)/VRAM automatically.
 #   - Discovers RPC worker(s) by UDP broadcast.
 #   - Builds llama.cpp with CUDA + RPC.
-#   - Lets llama.cpp automatically split according to free VRAM.
+#   - Uses a VRAM-weighted split so larger GPUs carry more
+#     of the model than smaller worker GPUs.
 #   - Starts llama-server (or llama-cli for testing).
 #
 # No worker IP or GPU size needs to be entered.
@@ -54,6 +55,60 @@ model_alias_from_path() {
     basename "$path" | sed -E 's/\.[Gg][Gg][Uu][Ff]$//'
 }
 
+local_vram_split() {
+    nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits \
+        | awk '{ gsub(/[^0-9.]/, "", $1); if ($1 > 0) { if (out != "") out = out ","; out = out int($1) } } END { print out }'
+}
+
+worker_vram_mib_from_gpu() {
+    printf '%s\n' "$1" | awk '
+        BEGIN { total = 0 }
+        {
+            n = split($0, cards, ";")
+            for (i = 1; i <= n; i++) {
+                m = split(cards[i], fields, ",")
+                if (m >= 3) {
+                    value = fields[3]
+                } else if (m >= 2) {
+                    value = fields[2]
+                } else {
+                    value = 0
+                }
+                gsub(/[^0-9.]/, "", value)
+                total += int(value)
+            }
+        }
+        END { if (total > 0) print total }
+    '
+}
+
+join_csv() {
+    local IFS=,
+    echo "$*"
+}
+
+print_split_percentages() {
+    local split_spec="$1"
+    local local_count="$2"
+
+    awk -v split_spec="$split_spec" -v local_count="$local_count" '
+        BEGIN {
+            n = split(split_spec, parts, ",")
+            total = 0
+            for (i = 1; i <= n; i++) total += parts[i]
+            if (total <= 0) exit
+            for (i = 1; i <= n; i++) {
+                if (i <= local_count) {
+                    label = (local_count == 1) ? "Host" : "Host" i
+                } else {
+                    label = "Worker" (i - local_count)
+                }
+                printf "Split device %s: %.0f%%\n", label, (parts[i] / total) * 100
+            }
+        }
+    '
+}
+
 ensure_server_port_free() {
     local port="$1"
 
@@ -79,14 +134,25 @@ if [[ -z "$LOCAL_GPU" ]]; then
     exit 1
 fi
 echo "$LOCAL_GPU"
+LOCAL_VRAM_SPLIT="$(local_vram_split)"
+LOCAL_GPU_COUNT="$(awk -F, 'NF { count++ } END { print count + 0 }' <<< "$LOCAL_GPU")"
+if [[ -z "$LOCAL_VRAM_SPLIT" ]]; then
+    LOCAL_VRAM_SPLIT="8192"
+    LOCAL_GPU_COUNT="1"
+fi
 echo
 
 echo "[2/6] Discovering llama.cpp RPC workers on the local subnet"
+WORKER_VRAM_SPLIT=""
 
-DISCOVERY_PS1="$LLAMA_DIR/.llama-rpc-discovery-client.ps1"
-mkdir -p "$LLAMA_DIR"
+if [[ -n "${RPC_SERVERS:-}" ]]; then
+    RPC_LIST="$RPC_SERVERS"
+    echo "Using manual RPC endpoint(s): $RPC_LIST"
+else
+    DISCOVERY_PS1="$LLAMA_DIR/.llama-rpc-discovery-client.ps1"
+    mkdir -p "$LLAMA_DIR"
 
-cat > "$DISCOVERY_PS1" <<'POWERSHELL'
+    cat > "$DISCOVERY_PS1" <<'POWERSHELL'
 param(
     [int]$DiscoveryPort = 50053,
     [int]$Seconds = 3
@@ -149,40 +215,45 @@ $seen.Keys | Sort-Object | ForEach-Object {
 }
 POWERSHELL
 
-DISCOVERY_WIN="$(cygpath -w "$DISCOVERY_PS1")"
+    DISCOVERY_WIN="$(cygpath -w "$DISCOVERY_PS1")"
 
-DISCOVERED="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$DISCOVERY_WIN" \
-  -DiscoveryPort "$DISCOVERY_PORT" -Seconds "$DISCOVERY_SECONDS" | tr -d '\r' || true)"
+    DISCOVERED="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$DISCOVERY_WIN" \
+      -DiscoveryPort "$DISCOVERY_PORT" -Seconds "$DISCOVERY_SECONDS" | tr -d '\r' || true)"
 
-if [[ -z "$DISCOVERED" ]]; then
+    if [[ -z "$DISCOVERED" ]]; then
+        echo
+        echo "ERROR: No RPC worker answered automatic discovery."
+        echo
+        echo "Check that:"
+        echo "  1. share-gpu-worker-windows-nvidia.sh is running on the other PC,"
+        echo "  2. both PCs are on the same LAN/VLAN,"
+        echo "  3. Windows Firewall considers them part of LocalSubnet,"
+        echo "  4. your network does not block local UDP broadcast."
+        echo
+        echo "You may override discovery manually as a fallback:"
+        echo '  RPC_SERVERS=192.168.1.11:50052 ./start-distributed-model-windows-nvidia.sh'
+        exit 1
+    fi
+
+    ENDPOINTS=()
+    WORKER_VRAMS=()
+    while IFS=$'\t' read -r endpoint hostname gpu; do
+        worker_vram="$(worker_vram_mib_from_gpu "$gpu")"
+        [[ -n "$worker_vram" ]] || worker_vram="8192"
+        ENDPOINTS+=("$endpoint")
+        WORKER_VRAMS+=("$worker_vram")
+        echo "Found: $hostname at $endpoint"
+        echo "       GPU: $gpu"
+        echo "       Free VRAM advertised: ${worker_vram} MiB"
+    done <<< "$DISCOVERED"
     echo
-    echo "ERROR: No RPC worker answered automatic discovery."
-    echo
-    echo "Check that:"
-    echo "  1. share-gpu-worker-windows-nvidia.sh is running on the other PC,"
-    echo "  2. both PCs are on the same LAN/VLAN,"
-    echo "  3. Windows Firewall considers them part of LocalSubnet,"
-    echo "  4. your network does not block local UDP broadcast."
-    echo
-    echo "You may override discovery manually as a fallback:"
-    echo '  RPC_SERVERS=192.168.1.11:50052 ./start-distributed-model-windows-nvidia.sh'
-    exit 1
-fi
 
-echo "$DISCOVERED" | while IFS=$'\t' read -r endpoint hostname gpu; do
-    echo "Found: $hostname at $endpoint"
-    echo "       GPU: $gpu"
-done
-echo
-
-if [[ -n "${RPC_SERVERS:-}" ]]; then
-    RPC_LIST="$RPC_SERVERS"
-else
-    mapfile -t ENDPOINTS < <(printf '%s\n' "$DISCOVERED" | awk -F $'\t' '{print $1}')
     if [[ "$USE_ALL_WORKERS" == "1" ]]; then
-        RPC_LIST="$(IFS=,; echo "${ENDPOINTS[*]}")"
+        RPC_LIST="$(join_csv "${ENDPOINTS[@]}")"
+        WORKER_VRAM_SPLIT="$(join_csv "${WORKER_VRAMS[@]}")"
     else
         RPC_LIST="${ENDPOINTS[0]}"
+        WORKER_VRAM_SPLIT="${WORKER_VRAMS[0]}"
     fi
 fi
 
@@ -243,15 +314,19 @@ fi
 
 echo "[6/6] Starting distributed inference"
 echo
-echo "IMPORTANT:"
-echo "  No --tensor-split is specified."
-echo "  llama.cpp will automatically allocate layers/KV across local"
-echo "  and RPC GPUs according to AVAILABLE device memory."
-echo "  --fit is left enabled (the default) so runtime settings can"
-echo "  be adjusted to fit device memory."
-echo
 MODEL_ALIAS="${MODEL_ALIAS:-$(model_alias_from_path "$MODEL")}"
 echo "Model name: $MODEL_ALIAS"
+AUTO_TENSOR_SPLIT=""
+if [[ -n "$LOCAL_VRAM_SPLIT" && -n "${WORKER_VRAM_SPLIT:-}" ]]; then
+    AUTO_TENSOR_SPLIT="$LOCAL_VRAM_SPLIT,$WORKER_VRAM_SPLIT"
+fi
+TENSOR_SPLIT="${TENSOR_SPLIT:-$AUTO_TENSOR_SPLIT}"
+if [[ -n "$TENSOR_SPLIT" ]]; then
+    echo "llama.cpp tensor split: $TENSOR_SPLIT"
+    print_split_percentages "$TENSOR_SPLIT" "$LOCAL_GPU_COUNT"
+else
+    echo "llama.cpp tensor split: automatic"
+fi
 echo
 
 COMMON_ARGS=(
@@ -262,6 +337,10 @@ COMMON_ARGS=(
     --ctx-size "$CONTEXT"
     --fit on
 )
+
+if [[ -n "$TENSOR_SPLIT" ]]; then
+    COMMON_ARGS+=(--tensor-split "$TENSOR_SPLIT")
+fi
 
 if [[ "$MODE" == "cli" ]]; then
     exec "$APP" "${COMMON_ARGS[@]}"

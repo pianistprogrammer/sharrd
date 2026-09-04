@@ -10,7 +10,8 @@ set -euo pipefail
 #   - detects local NVIDIA GPU(s)
 #   - discovers RPC workers by UDP broadcast
 #   - builds llama.cpp with CUDA + RPC
-#   - lets llama.cpp split layers across local and remote GPUs
+#   - uses a VRAM-weighted split so larger GPUs carry more
+#     of the model than smaller worker GPUs
 #   - starts llama-server or llama-cli
 # ============================================================
 
@@ -47,6 +48,60 @@ model_alias_from_path() {
     basename "$path" | sed -E 's/\.[Gg][Gg][Uu][Ff]$//'
 }
 
+local_vram_split() {
+    nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits \
+        | awk '{ gsub(/[^0-9.]/, "", $1); if ($1 > 0) { if (out != "") out = out ","; out = out int($1) } } END { print out }'
+}
+
+worker_vram_mib_from_gpu() {
+    printf '%s\n' "$1" | awk '
+        BEGIN { total = 0 }
+        {
+            n = split($0, cards, ";")
+            for (i = 1; i <= n; i++) {
+                m = split(cards[i], fields, ",")
+                if (m >= 3) {
+                    value = fields[3]
+                } else if (m >= 2) {
+                    value = fields[2]
+                } else {
+                    value = 0
+                }
+                gsub(/[^0-9.]/, "", value)
+                total += int(value)
+            }
+        }
+        END { if (total > 0) print total }
+    '
+}
+
+join_csv() {
+    local IFS=,
+    echo "$*"
+}
+
+print_split_percentages() {
+    local split_spec="$1"
+    local local_count="$2"
+
+    awk -v split_spec="$split_spec" -v local_count="$local_count" '
+        BEGIN {
+            n = split(split_spec, parts, ",")
+            total = 0
+            for (i = 1; i <= n; i++) total += parts[i]
+            if (total <= 0) exit
+            for (i = 1; i <= n; i++) {
+                if (i <= local_count) {
+                    label = (local_count == 1) ? "Host" : "Host" i
+                } else {
+                    label = "Worker" (i - local_count)
+                }
+                printf "Split device %s: %.0f%%\n", label, (parts[i] / total) * 100
+            }
+        }
+    '
+}
+
 ensure_server_port_free() {
     local port="$1"
 
@@ -79,11 +134,18 @@ if [[ -z "$LOCAL_GPU" ]]; then
     exit 1
 fi
 echo "$LOCAL_GPU"
+LOCAL_VRAM_SPLIT="$(local_vram_split)"
+LOCAL_GPU_COUNT="$(awk -F, 'NF { count++ } END { print count + 0 }' <<< "$LOCAL_GPU")"
+if [[ -z "$LOCAL_VRAM_SPLIT" ]]; then
+    LOCAL_VRAM_SPLIT="8192"
+    LOCAL_GPU_COUNT="1"
+fi
 echo
 
 echo "[2/6] Discovering llama.cpp RPC workers on the local subnet"
 if [[ -n "${RPC_SERVERS:-}" ]]; then
     RPC_LIST="$RPC_SERVERS"
+    WORKER_VRAM_SPLIT=""
     echo "Using manual RPC endpoint(s): $RPC_LIST"
 else
     DISCOVERED="$(python3 - "$DISCOVERY_PORT" "$DISCOVERY_SECONDS" <<'PY'
@@ -129,17 +191,25 @@ PY
         exit 1
     fi
 
-    echo "$DISCOVERED" | while IFS=$'\t' read -r endpoint hostname gpu; do
+    ENDPOINTS=()
+    WORKER_VRAMS=()
+    while IFS=$'\t' read -r endpoint hostname gpu; do
+        worker_vram="$(worker_vram_mib_from_gpu "$gpu")"
+        [[ -n "$worker_vram" ]] || worker_vram="8192"
+        ENDPOINTS+=("$endpoint")
+        WORKER_VRAMS+=("$worker_vram")
         echo "Found: $hostname at $endpoint"
         echo "       GPU: $gpu"
-    done
+        echo "       Free VRAM advertised: ${worker_vram} MiB"
+    done <<< "$DISCOVERED"
     echo
 
-    mapfile -t ENDPOINTS < <(printf '%s\n' "$DISCOVERED" | awk -F $'\t' '{print $1}')
     if [[ "$USE_ALL_WORKERS" == "1" ]]; then
-        RPC_LIST="$(IFS=,; echo "${ENDPOINTS[*]}")"
+        RPC_LIST="$(join_csv "${ENDPOINTS[@]}")"
+        WORKER_VRAM_SPLIT="$(join_csv "${WORKER_VRAMS[@]}")"
     else
         RPC_LIST="${ENDPOINTS[0]}"
+        WORKER_VRAM_SPLIT="${WORKER_VRAMS[0]}"
     fi
 fi
 echo
@@ -196,6 +266,17 @@ echo "Using RPC endpoint(s): $RPC_LIST"
 echo
 MODEL_ALIAS="${MODEL_ALIAS:-$(model_alias_from_path "$MODEL")}"
 echo "Model name: $MODEL_ALIAS"
+AUTO_TENSOR_SPLIT=""
+if [[ -n "$LOCAL_VRAM_SPLIT" && -n "${WORKER_VRAM_SPLIT:-}" ]]; then
+    AUTO_TENSOR_SPLIT="$LOCAL_VRAM_SPLIT,$WORKER_VRAM_SPLIT"
+fi
+TENSOR_SPLIT="${TENSOR_SPLIT:-$AUTO_TENSOR_SPLIT}"
+if [[ -n "$TENSOR_SPLIT" ]]; then
+    echo "llama.cpp tensor split: $TENSOR_SPLIT"
+    print_split_percentages "$TENSOR_SPLIT" "$LOCAL_GPU_COUNT"
+else
+    echo "llama.cpp tensor split: automatic"
+fi
 echo
 
 COMMON_ARGS=(
@@ -206,6 +287,10 @@ COMMON_ARGS=(
     --ctx-size "$CONTEXT"
     --fit on
 )
+
+if [[ -n "$TENSOR_SPLIT" ]]; then
+    COMMON_ARGS+=(--tensor-split "$TENSOR_SPLIT")
+fi
 
 if [[ "$MODE" == "cli" ]]; then
     exec "$APP" "${COMMON_ARGS[@]}"
