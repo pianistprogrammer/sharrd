@@ -76,6 +76,49 @@ fi
 command -v git >/dev/null 2>&1 || die "git is required."
 command -v dns-sd >/dev/null 2>&1 || die "dns-sd (Bonjour) is required."
 
+resolve_ipv4() {
+    local host="$1"
+    local resolve_log
+    local ip
+
+    if [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        printf '%s\n' "$host"
+        return 0
+    fi
+
+    resolve_log="$(mktemp -t llama-rpc-host-ip.XXXXXX)"
+    dns-sd -G v4 "$host" >"$resolve_log" 2>&1 &
+    local resolve_pid=$!
+    sleep 2
+    kill "$resolve_pid" >/dev/null 2>&1 || true
+    wait "$resolve_pid" >/dev/null 2>&1 || true
+
+    ip="$(awk '{for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {print $i; exit}}' "$resolve_log")"
+    rm -f "$resolve_log"
+
+    [[ -n "$ip" ]] && printf '%s\n' "$ip"
+}
+
+wait_for_tcp() {
+    local host="$1"
+    local port="$2"
+    local label="$3"
+
+    if ! command -v nc >/dev/null 2>&1; then
+        echo "Cannot verify $label because nc is unavailable; using it anyway."
+        return 0
+    fi
+
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        if nc -z -G 2 "$host" "$port" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+
+    return 1
+}
+
 # ----- Discover workers -----
 echo "[1/5] Discovering Macs sharing llama.cpp RPC..."
 BROWSE_LOG="$(mktemp -t llama-rpc-browse.XXXXXX)"
@@ -158,16 +201,31 @@ while IFS= read -r svc; do
         # TARGET is usually host.local.:port or host.local:port.
         TARGET="${TARGET%.}"
         TARGET="${TARGET/.:/:}"
+        TARGET_HOST="${TARGET%:*}"
+        TARGET_PORT="${TARGET##*:}"
+        TARGET_IP="$(resolve_ipv4 "$TARGET_HOST" || true)"
+        ENDPOINT_HOST="${TARGET_IP:-$TARGET_HOST}"
+        ENDPOINT="$ENDPOINT_HOST:$TARGET_PORT"
+
         echo "Resolved $svc -> $TARGET"
-        if [[ -z "$RPC_ENDPOINTS" ]]; then
-            RPC_ENDPOINTS="$TARGET"
+        if [[ -n "$TARGET_IP" && "$TARGET_IP" != "$TARGET_HOST" ]]; then
+            echo "Using reachable IPv4 endpoint: $ENDPOINT"
+        fi
+
+        echo "Checking RPC TCP connection to $ENDPOINT..."
+        if wait_for_tcp "$ENDPOINT_HOST" "$TARGET_PORT" "$ENDPOINT"; then
+            if [[ -z "$RPC_ENDPOINTS" ]]; then
+                RPC_ENDPOINTS="$ENDPOINT"
+            else
+                RPC_ENDPOINTS="$RPC_ENDPOINTS,$ENDPOINT"
+            fi
         else
-            RPC_ENDPOINTS="$RPC_ENDPOINTS,$TARGET"
+            echo "WARNING: $ENDPOINT was discovered by Bonjour but did not accept TCP connections on port $TARGET_PORT. Skipping it."
         fi
     fi
 done <<< "$SERVICE_NAMES"
 
-[[ -n "$RPC_ENDPOINTS" ]] || die "Worker(s) were visible in Bonjour but could not be resolved."
+[[ -n "$RPC_ENDPOINTS" ]] || die "Worker(s) were visible in Bonjour but no reachable RPC TCP endpoint was found."
 
 echo
 echo "RPC worker(s): $RPC_ENDPOINTS"

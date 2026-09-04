@@ -25,7 +25,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type Role = "host" | "worker";
 type Stack = "apple" | "nvidia";
@@ -152,6 +152,8 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [logsOpen, setLogsOpen] = useState(false);
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied">("idle");
+  const activeSessionRef = useRef<string | null>(null);
+  const waitsForServerRef = useRef(false);
 
   useEffect(() => {
     invoke<HostInfo>("detect_host")
@@ -175,9 +177,8 @@ function App() {
       listen<LogEvent>("session-log", (event) => {
         setLogs((current) => [...current.slice(-799), event.payload]);
         if (
-          event.payload.sessionId === sessionId &&
-          options.role === "host" &&
-          options.mode === "server" &&
+          event.payload.sessionId === activeSessionRef.current &&
+          waitsForServerRef.current &&
           isServerReadyLine(event.payload.line)
         ) {
           setReady(true);
@@ -185,8 +186,12 @@ function App() {
         }
       }),
       listen<SessionEvent>("session-ended", (event) => {
+        if (event.payload.sessionId !== activeSessionRef.current) return;
+
         setRunning(false);
         setReady(false);
+        activeSessionRef.current = null;
+        waitsForServerRef.current = false;
         setSessionId(null);
         const code = event.payload.code;
         setStatus(code == null ? event.payload.status : `${event.payload.status} (${code})`);
@@ -196,7 +201,7 @@ function App() {
     return () => {
       unlisteners.then((items) => items.forEach((unlisten) => unlisten()));
     };
-  }, [options.mode, options.role, sessionId]);
+  }, []);
 
   useEffect(() => {
     invoke<LaunchPreview>("build_preview", { options })
@@ -249,6 +254,8 @@ function App() {
     try {
       const id = await invoke<string>("start_session", { options });
       const waitsForServer = options.role === "host" && options.mode === "server";
+      activeSessionRef.current = id;
+      waitsForServerRef.current = waitsForServer;
       setSessionId(id);
       setRunning(true);
       setReady(!waitsForServer);
@@ -430,14 +437,6 @@ function App() {
                   placeholder={defaultLlamaPlaceholder(options)}
                   value={options.llamaDir}
                   onChange={(event) => updateOption("llamaDir", event.target.value)}
-                />
-              </Field>
-
-              <Field label="Shell">
-                <input
-                  placeholder={options.targetOs === "windows" ? "bash.exe" : "bash"}
-                  value={options.shellPath}
-                  onChange={(event) => updateOption("shellPath", event.target.value)}
                 />
               </Field>
 
