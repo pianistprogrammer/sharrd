@@ -16,13 +16,16 @@ import {
   FolderOpen,
   HardDrive,
   Layers3,
+  Moon,
   MonitorCog,
   Network,
   Play,
+  Search,
   Server,
   Settings2,
   Shield,
   Square,
+  Sun,
   Terminal,
   TriangleAlert,
   type LucideIcon,
@@ -93,6 +96,11 @@ type DistributionItem = {
   percent?: number;
 };
 
+type WorkerNode = {
+  label: string;
+  endpoint: string;
+};
+
 const defaultOptions: LaunchOptions = {
   role: "host",
   stack: "apple",
@@ -149,6 +157,11 @@ const modeOptions = [
   { value: "cli" as Mode, label: "CLI" },
 ];
 
+function getSystemTheme(): "dark" | "light" {
+  if (typeof window === "undefined") return "dark";
+  return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+}
+
 function App() {
   const [options, setOptions] = useState<LaunchOptions>(defaultOptions);
   const [hostInfo, setHostInfo] = useState<HostInfo | null>(null);
@@ -159,10 +172,14 @@ function App() {
   const [ready, setReady] = useState(false);
   const [status, setStatus] = useState("Ready");
   const [error, setError] = useState<string | null>(null);
-  const [logsOpen, setLogsOpen] = useState(false);
+  const [logsOpen, setLogsOpen] = useState(true);
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied">("idle");
+  const [systemTheme, setSystemTheme] = useState<"dark" | "light">(() => getSystemTheme());
+  const [themeOverride, setThemeOverride] = useState<"dark" | "light" | null>(null);
   const activeSessionRef = useRef<string | null>(null);
   const waitsForServerRef = useRef(false);
+  const modelPathInputRef = useRef<HTMLInputElement | null>(null);
+  const llamaDirInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     invoke<HostInfo>("detect_host")
@@ -180,6 +197,27 @@ function App() {
         setStatus("Browser preview");
       });
   }, []);
+
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: light)");
+    const updateSystemTheme = () => setSystemTheme(media.matches ? "light" : "dark");
+
+    updateSystemTheme();
+    media.addEventListener("change", updateSystemTheme);
+    return () => media.removeEventListener("change", updateSystemTheme);
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        focusPrimaryInput();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  });
 
   useEffect(() => {
     const unlisteners = Promise.all([
@@ -306,8 +344,17 @@ function App() {
   const serverUrl = getServerUrl(options, hostInfo);
   const showServerUrl = running && options.role === "host" && options.mode === "server";
   const distribution = useMemo(() => getLoadDistribution(logs), [logs]);
+  const workerNodes = useMemo(() => getWorkerNodes(logs), [logs]);
   const activeRequirements = preview?.requirements ?? [];
   const modelName = useMemo(() => getModelDisplayName(options.modelPath), [options.modelPath]);
+  const clusterLabel = getClusterLabel(options, running, workerNodes.length);
+  const theme = themeOverride ?? systemTheme;
+
+  const focusPrimaryInput = () => {
+    const input = options.role === "host" ? modelPathInputRef.current : llamaDirInputRef.current;
+    input?.focus();
+    input?.select();
+  };
 
   const copyServerUrl = async () => {
     setError(null);
@@ -321,7 +368,7 @@ function App() {
   };
 
   return (
-    <main className="app-shell">
+    <main className={theme === "light" ? "app-shell light-theme" : "app-shell"}>
       <div className="desktop-window">
         <header className="titlebar">
           <div className="brand-cluster">
@@ -333,7 +380,7 @@ function App() {
             <div className="brand-mark">
               <Boxes size={16} />
               <strong>Sharrd</strong>
-              <span>v0.1.0</span>
+              <span>v1.4.2-dist</span>
             </div>
           </div>
 
@@ -345,12 +392,27 @@ function App() {
                 <code>{serverUrl}</code>
               </>
             ) : null}
+            <span className="status-divider" />
+            <strong className="cluster-copy">{clusterLabel}</strong>
           </div>
 
           <div className="title-actions">
+            <button className="quick-find-button" onClick={focusPrimaryInput} type="button">
+              <Search size={14} />
+              <span>Quick Find</span>
+              <kbd>⌘K</kbd>
+            </button>
             <button className="secondary-button" onClick={() => setLogsOpen((open) => !open)} type="button">
               {logsOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
               <span>{logsOpen ? "Hide logs" : "Show logs"}</span>
+            </button>
+            <button
+              aria-label="Toggle color theme"
+              className="theme-button"
+              onClick={() => setThemeOverride(theme === "dark" ? "light" : "dark")}
+              type="button"
+            >
+              {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
             </button>
             <div className="host-pill">
               <MonitorCog size={15} />
@@ -407,6 +469,39 @@ function App() {
               />
             </Panel>
 
+            <div className="worker-block">
+              <div className="rail-section-label">Active workers</div>
+              <div className="worker-list">
+                {workerNodes.length > 0 ? (
+                  workerNodes.map((worker) => (
+                    <div className="worker-card" key={worker.endpoint}>
+                      <div>
+                        <strong>{worker.label}</strong>
+                        <span className="small-dot active" />
+                      </div>
+                      <code>{worker.endpoint}</code>
+                      <p>
+                        <span>RPC device</span>
+                        <strong>Ready</strong>
+                      </p>
+                    </div>
+                  ))
+                ) : (
+                  <div className="worker-card empty">
+                    <div>
+                      <strong>No worker yet</strong>
+                      <span className="small-dot" />
+                    </div>
+                    <code>{options.stack === "apple" ? "Bonjour discovery" : "UDP discovery"}</code>
+                    <p>
+                      <span>{running ? "Waiting" : "Standby"}</span>
+                      <strong>{running ? "Scanning" : "Idle"}</strong>
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+
             <div className="rail-status-card">
               <span className={running ? "small-dot active" : "small-dot"} />
               <div>
@@ -460,6 +555,7 @@ function App() {
                     <Field label="GGUF model path" className="span-4">
                       <div className="path-picker">
                         <input
+                          ref={modelPathInputRef}
                           placeholder={options.targetOs === "windows" ? "/c/models/model.gguf" : "/Users/me/Models/model.gguf"}
                           value={options.modelPath}
                           onChange={(event) => updateOption("modelPath", event.target.value)}
@@ -474,6 +570,7 @@ function App() {
 
                   <Field label="llama.cpp directory" className={options.role === "host" ? "span-2" : "span-3"}>
                     <input
+                      ref={llamaDirInputRef}
                       placeholder={defaultLlamaPlaceholder(options)}
                       value={options.llamaDir}
                       onChange={(event) => updateOption("llamaDir", event.target.value)}
@@ -900,6 +997,28 @@ function getLoadDistribution(logs: LogEvent[]): DistributionItem[] {
       detail: endpoint,
     })),
   ];
+}
+
+function getWorkerNodes(logs: LogEvent[]): WorkerNode[] {
+  const rpcLine = [...logs].reverse().find((entry) => entry.line.toLowerCase().includes("rpc worker(s):"));
+  if (!rpcLine) return [];
+
+  return rpcLine.line
+    .replace(/^.*rpc worker\(s\):/i, "")
+    .split(",")
+    .map((endpoint) => endpoint.trim())
+    .filter(Boolean)
+    .map((endpoint, index) => ({
+      label: `Worker ${index + 1}`,
+      endpoint,
+    }));
+}
+
+function getClusterLabel(options: LaunchOptions, running: boolean, workerCount: number) {
+  if (!running) return "Ready for local cluster";
+  if (options.role === "worker") return "RPC worker online";
+  if (workerCount === 0) return "Local engine active";
+  return `${workerCount + 1} Nodes Clustered`;
 }
 
 function parseDistributionLine(line: string): DistributionItem[] {
