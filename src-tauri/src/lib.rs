@@ -2,11 +2,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 
 const WINDOWS_START_SCRIPT: &str = include_str!("../../start-distributed-model-windows-nvidia.sh");
@@ -272,6 +273,26 @@ fn start_session(
 }
 
 #[tauri::command]
+fn check_server_ready(host: String, port: String) -> bool {
+    let host = host.trim();
+    let Ok(port) = port.trim().parse::<u16>() else {
+        return false;
+    };
+
+    if host.is_empty() {
+        return false;
+    }
+
+    let Ok(addresses) = (host, port).to_socket_addrs() else {
+        return false;
+    };
+
+    addresses
+        .into_iter()
+        .any(|address| TcpStream::connect_timeout(&address, Duration::from_millis(450)).is_ok())
+}
+
+#[tauri::command]
 fn stop_session(
     state: tauri::State<'_, SessionRegistry>,
     session_id: String,
@@ -324,6 +345,12 @@ fn script_for(options: &LaunchOptions) -> Result<(&'static str, &'static str), S
 
 fn env_for(options: &LaunchOptions) -> Vec<EnvVar> {
     let mut env = Vec::new();
+    let server_port = if options.server_port.trim().is_empty() {
+        "8080"
+    } else {
+        options.server_port.trim()
+    };
+
     push_env(&mut env, "PATH", &launch_path_for(options));
     push_env(&mut env, "LLAMA_DIR", &options.llama_dir);
     push_env(&mut env, "MODEL", &options.model_path);
@@ -331,6 +358,9 @@ fn env_for(options: &LaunchOptions) -> Vec<EnvVar> {
     push_env(&mut env, "SERVER_HOST", &options.server_host);
     push_env(&mut env, "SERVER_BIND", &options.server_host);
     push_env(&mut env, "SERVER_PORT", &options.server_port);
+    if options.role == "host" && options.mode == "server" {
+        push_env(&mut env, "SERVER_CORS_ORIGINS", &server_cors_origins(options, server_port));
+    }
     push_env(&mut env, "RPC_PORT", &options.rpc_port);
     push_env(&mut env, "DISCOVERY_PORT", &options.discovery_port);
     push_env(&mut env, "DISCOVERY_SECONDS", &options.discovery_seconds);
@@ -347,6 +377,31 @@ fn env_for(options: &LaunchOptions) -> Vec<EnvVar> {
     );
     push_env(&mut env, "RPC_SERVERS", &options.manual_rpc_servers);
     env
+}
+
+fn server_cors_origins(options: &LaunchOptions, server_port: &str) -> String {
+    let bind = options.server_host.trim();
+    let public_host = if bind.is_empty() || bind == "0.0.0.0" || bind == "::" {
+        local_server_host()
+    } else {
+        bind.to_string()
+    };
+
+    let mut origins = vec![
+        format!("http://localhost:{server_port}"),
+        format!("http://127.0.0.1:{server_port}"),
+    ];
+
+    if !public_host.is_empty()
+        && public_host != "localhost"
+        && public_host != "127.0.0.1"
+        && public_host != "0.0.0.0"
+        && public_host != "::"
+    {
+        origins.push(format!("http://{public_host}:{server_port}"));
+    }
+
+    origins.join(",")
 }
 
 fn launch_path_for(options: &LaunchOptions) -> String {
@@ -556,6 +611,7 @@ pub fn run() {
             detect_host,
             build_preview,
             start_session,
+            check_server_ready,
             stop_session
         ])
         .setup(|app| {

@@ -269,10 +269,14 @@ else
     ensure_server_port_free "$SERVER_PORT"
     echo "Server bind: $SERVER_BIND:$SERVER_PORT"
     echo
-    exec "$APP" \
-        "${COMMON_ARGS[@]}" \
-        --alias "$MODEL_ALIAS" \
-        --cors-origins localhost \
-        --host "$SERVER_BIND" \
+    SERVER_ARGS=(
+        "${COMMON_ARGS[@]}"
+        --alias "$MODEL_ALIAS"
+        --host "$SERVER_BIND"
         --port "$SERVER_PORT"
+    )
+    if [[ -n "${SERVER_CORS_ORIGINS:-}" ]]; then
+        SERVER_ARGS+=(--cors-origins "$SERVER_CORS_ORIGINS")
+    fi
+    exec "$APP" "${SERVER_ARGS[@]}"
 fi

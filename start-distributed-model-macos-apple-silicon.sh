@@ -337,10 +337,14 @@ else
     ensure_server_port_free "$SERVER_PORT"
     echo "llama-server: http://${SERVER_HOST}:${SERVER_PORT}"
     echo
-    exec "$SERVER_EXE" \
-        "${COMMON_ARGS[@]}" \
-        --alias "$MODEL_ALIAS" \
-        --cors-origins localhost \
-        --host "$SERVER_HOST" \
+    SERVER_ARGS=(
+        "${COMMON_ARGS[@]}"
+        --alias "$MODEL_ALIAS"
+        --host "$SERVER_HOST"
         --port "$SERVER_PORT"
+    )
+    if [[ -n "${SERVER_CORS_ORIGINS:-}" ]]; then
+        SERVER_ARGS+=(--cors-origins "$SERVER_CORS_ORIGINS")
+    fi
+    exec "$SERVER_EXE" "${SERVER_ARGS[@]}"
 fi

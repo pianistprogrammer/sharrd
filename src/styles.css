@@ -1327,6 +1327,7 @@ input:focus {
 .log-panel {
   background: #0a0b0d;
   border-color: rgba(64, 64, 64, 0.74);
+  flex: 0 0 auto;
   margin: 0 18px 18px;
   overflow: hidden;
   padding: 0;
@@ -1439,9 +1440,10 @@ input:focus {
   border-radius: 0;
   color: var(--code-text);
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  height: 276px;
+  height: min(276px, 30vh);
   overflow: auto;
-  padding: 12px;
+  padding: 12px 12px 30px;
+  scroll-padding-bottom: 30px;
 }
 
 .empty-log {

@@ -181,6 +181,7 @@ function App() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [ready, setReady] = useState(false);
+  const [serverReachable, setServerReachable] = useState(false);
   const [status, setStatus] = useState("Ready");
   const [error, setError] = useState<string | null>(null);
   const [logsOpen, setLogsOpen] = useState(false);
@@ -264,6 +265,7 @@ function App() {
 
         setRunning(false);
         setReady(false);
+        setServerReachable(false);
         activeSessionRef.current = null;
         waitsForServerRef.current = false;
         setSessionId(null);
@@ -332,6 +334,7 @@ function App() {
     setLogs([]);
     setStatus("Starting");
     setReady(false);
+    setServerReachable(false);
     try {
       const id = await invoke<string>("start_session", { options });
       const waitsForServer = options.role === "host" && options.mode === "server";
@@ -369,6 +372,7 @@ function App() {
       setSessionId(null);
       setRunning(false);
       setReady(false);
+      setServerReachable(false);
       window.setTimeout(() => {
         void start();
       }, 700);
@@ -403,10 +407,15 @@ function App() {
     () => (sessionId ? logs.filter((entry) => entry.sessionId === sessionId) : logs),
     [logs, sessionId],
   );
-  const serverUrl = getServerUrl(options, hostInfo);
-  const serverListening = useMemo(() => hasLog(sessionLogs, (line) => isServerReadyLine(line)), [sessionLogs]);
+  const serverEndpoint = useMemo(() => getServerEndpoint(options, hostInfo), [hostInfo, options.serverHost, options.serverPort]);
+  const serverUrl = getServerUrl(serverEndpoint);
+  const serverListening = useMemo(
+    () => serverReachable || hasLog(sessionLogs, (line) => isServerReadyLine(line)),
+    [serverReachable, sessionLogs],
+  );
   const sessionLive = Boolean(sessionId) && running;
-  const showServerUrl = options.role === "host" && options.mode === "server" && sessionLive;
+  const sessionInProgress = Boolean(sessionId) || running;
+  const showServerUrl = options.role === "host" && options.mode === "server" && sessionLive && serverListening;
   const distribution = useMemo(() => getLoadDistribution(sessionLogs), [sessionLogs]);
   const workerNodes = useMemo(() => getWorkerNodes(sessionLogs), [sessionLogs]);
   const filteredLogs = useMemo(() => filterLogs(logs, logFilter), [logFilter, logs]);
@@ -428,10 +437,52 @@ function App() {
   }, [ready, serverListening, sessionLive]);
 
   useEffect(() => {
+    if (!isTauriRuntime() || options.role !== "host" || options.mode !== "server" || !sessionLive) {
+      return;
+    }
+
+    let cancelled = false;
+    const probe = async () => {
+      try {
+        const reachable = await invoke<boolean>("check_server_ready", {
+          host: serverEndpoint.host,
+          port: serverEndpoint.port,
+        });
+
+        if (!cancelled) {
+          setServerReachable(reachable);
+        }
+
+        if (!cancelled && reachable) {
+          if (waitsForServerRef.current) {
+            setReady(true);
+            setStatus("Running");
+          }
+        }
+      } catch {
+        if (!cancelled) setServerReachable(false);
+      }
+    };
+
+    void probe();
+    const timer = window.setInterval(() => {
+      void probe();
+    }, 1000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [options.mode, options.role, serverEndpoint.host, serverEndpoint.port, sessionLive]);
+
+  useEffect(() => {
     if (!autoscroll || !logsOpen) return;
     const element = logWindowRef.current;
     if (!element) return;
-    element.scrollTop = element.scrollHeight;
+    const frame = window.requestAnimationFrame(() => {
+      element.scrollTop = element.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [autoscroll, filteredLogs.length, logsOpen]);
 
   const focusPrimaryInput = () => {
@@ -609,7 +660,7 @@ function App() {
                 <button className="icon-button restart-button" disabled={!sessionId || !sessionLive} onClick={restart} title="Restart cluster pipeline" type="button">
                   <RotateCcw size={15} />
                 </button>
-                {sessionLive ? (
+                {sessionInProgress ? (
                   <button className="stop-button primary-stop-button" disabled={!sessionId} onClick={stop} type="button">
                     <Square size={15} />
                     <span>Stop Engine</span>
@@ -1219,10 +1270,16 @@ function isHashSegment(value: string) {
   return /^[a-f0-9]{24,}$/i.test(value) || /^[a-z0-9]{40,}$/i.test(value);
 }
 
-function getServerUrl(options: LaunchOptions, hostInfo: HostInfo | null) {
+function getServerEndpoint(options: LaunchOptions, hostInfo: HostInfo | null) {
   const bind = options.serverHost.trim();
   const host = bind === "" || bind === "0.0.0.0" || bind === "::" ? hostInfo?.networkHost || "localhost" : bind;
-  return `http://${host}:${options.serverPort || "8080"}`;
+  const port = options.serverPort.trim() || "8080";
+
+  return { host, port };
+}
+
+function getServerUrl(endpoint: { host: string; port: string }) {
+  return `http://${endpoint.host}:${endpoint.port}`;
 }
 
 function isServerReadyLine(line: string) {
