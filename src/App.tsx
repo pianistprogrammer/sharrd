@@ -53,6 +53,35 @@ type LaunchOptions = {
   useAllWorkers: boolean;
   useCache: boolean;
   manualRpcServers: string;
+  experimentalPerf: boolean;
+  flashAttention: string;
+  kvCacheTypeK: string;
+  kvCacheTypeV: string;
+  kvOffload: boolean;
+  loadMode: string;
+  lazyMode: string;
+  batchSize: string;
+  ubatchSize: string;
+  threads: string;
+  threadsBatch: string;
+  parallelSlots: string;
+  continuousBatching: boolean;
+  cachePrompt: boolean;
+  cacheReuse: string;
+  cacheRam: string;
+  kvUnified: boolean;
+  kvUnifiedPerSlot: string;
+  swaFull: boolean;
+  repack: boolean;
+  noHostBuffer: boolean;
+  splitMode: string;
+  fitTarget: string;
+  cpuMoe: boolean;
+  nCpuMoe: string;
+  specType: string;
+  specDraftNMax: string;
+  specDraftNMin: string;
+  extraLlamaArgs: string;
 };
 
 type HostInfo = {
@@ -129,6 +158,35 @@ const defaultOptions: LaunchOptions = {
   useAllWorkers: true,
   useCache: true,
   manualRpcServers: "",
+  experimentalPerf: false,
+  flashAttention: "auto",
+  kvCacheTypeK: "f16",
+  kvCacheTypeV: "f16",
+  kvOffload: true,
+  loadMode: "none",
+  lazyMode: "auto",
+  batchSize: "2048",
+  ubatchSize: "512",
+  threads: "",
+  threadsBatch: "",
+  parallelSlots: "4",
+  continuousBatching: true,
+  cachePrompt: true,
+  cacheReuse: "",
+  cacheRam: "8192",
+  kvUnified: true,
+  kvUnifiedPerSlot: "",
+  swaFull: false,
+  repack: true,
+  noHostBuffer: false,
+  splitMode: "layer",
+  fitTarget: "1024",
+  cpuMoe: false,
+  nCpuMoe: "",
+  specType: "none",
+  specDraftNMax: "3",
+  specDraftNMin: "",
+  extraLlamaArgs: "",
 };
 
 const roleOptions = [
@@ -167,6 +225,10 @@ const modeOptions = [
   { value: "server" as Mode, label: "Server" },
   { value: "cli" as Mode, label: "CLI" },
 ];
+
+const kvCacheTypes = ["f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"];
+const loadModes = ["none", "auto", "mmap", "mlock", "mmap+mlock", "dio"];
+const lazyModes = ["auto", "on", "off"];
 
 function getSystemTheme(): "dark" | "light" {
   if (typeof window === "undefined") return "dark";
@@ -420,7 +482,7 @@ function App() {
   const workerNodes = useMemo(() => getWorkerNodes(sessionLogs), [sessionLogs]);
   const filteredLogs = useMemo(() => filterLogs(logs, logFilter), [logFilter, logs]);
   const sessionPid = useMemo(() => getSessionPid(logs, sessionId), [logs, sessionId]);
-  const activeRequirements = preview?.requirements ?? [];
+  const macFirewallHint = getMacFirewallHint(options);
   const systemStages = useMemo(
     () => getSystemStages(options, sessionLogs, sessionLive, ready || serverListening, status, error),
     [error, options, ready, serverListening, sessionLive, sessionLogs, status],
@@ -689,6 +751,7 @@ function App() {
                 {options.role === "host" && options.modelPath.trim().length === 0 ? (
                   <Alert message="A GGUF model path is required for the model starter." tone="warn" />
                 ) : null}
+                {macFirewallHint ? <Alert message={macFirewallHint} tone="warn" /> : null}
 
                 <div className="form-grid">
                   {options.role === "host" ? (
@@ -787,6 +850,13 @@ function App() {
 
                 <div className="toggle-row">
                   <div className="toggle-controls">
+                    {options.role === "host" ? (
+                      <Toggle
+                        checked={options.experimentalPerf}
+                        label="Experimental llama.cpp performance"
+                        onChange={(checked) => updateOption("experimentalPerf", checked)}
+                      />
+                    ) : null}
                     <Toggle
                       checked={options.useCache}
                       label="RPC Memory Cache"
@@ -803,6 +873,139 @@ function App() {
                     Active RPC workers: <strong>{workerNodes.length}</strong>
                   </div>
                 </div>
+
+                {options.role === "host" && options.experimentalPerf ? (
+                  <section className="experimental-panel">
+                    <div className="experimental-heading">
+                      <div>
+                        <p className="eyebrow">Experimental</p>
+                        <h3>llama.cpp performance flags</h3>
+                      </div>
+                      <TriangleAlert size={18} />
+                    </div>
+                    <p className="experimental-note">
+                      These settings map directly to llama.cpp flags and can improve throughput or memory use, but some models/backends may become slower or fail to load.
+                    </p>
+
+                    <div className="form-grid experimental-grid">
+                      <Field label="Flash attention">
+                        <select value={options.flashAttention} onChange={(event) => updateOption("flashAttention", event.target.value)}>
+                          <option value="auto">auto</option>
+                          <option value="on">on</option>
+                          <option value="off">off</option>
+                        </select>
+                      </Field>
+
+                      <Field label="KV cache K">
+                        <select value={options.kvCacheTypeK} onChange={(event) => updateOption("kvCacheTypeK", event.target.value)}>
+                          {kvCacheTypes.map((value) => <option key={value} value={value}>{value}</option>)}
+                        </select>
+                      </Field>
+
+                      <Field label="KV cache V">
+                        <select value={options.kvCacheTypeV} onChange={(event) => updateOption("kvCacheTypeV", event.target.value)}>
+                          {kvCacheTypes.map((value) => <option key={value} value={value}>{value}</option>)}
+                        </select>
+                      </Field>
+
+                      <Field label="Load mode">
+                        <select value={options.loadMode} onChange={(event) => updateOption("loadMode", event.target.value)}>
+                          {loadModes.map((value) => <option key={value} value={value}>{value}</option>)}
+                        </select>
+                      </Field>
+
+                      <Field label="Lazy mode">
+                        <select value={options.lazyMode} onChange={(event) => updateOption("lazyMode", event.target.value)}>
+                          {lazyModes.map((value) => <option key={value} value={value}>{value}</option>)}
+                        </select>
+                      </Field>
+
+                      <Field label="Split mode">
+                        <select value={options.splitMode} onChange={(event) => updateOption("splitMode", event.target.value)}>
+                          <option value="layer">layer</option>
+                          <option value="row">row</option>
+                          <option value="tensor">tensor experimental</option>
+                        </select>
+                      </Field>
+
+                      <Field label="Batch size">
+                        <input inputMode="numeric" value={options.batchSize} onChange={(event) => updateOption("batchSize", event.target.value)} />
+                      </Field>
+
+                      <Field label="Micro batch">
+                        <input inputMode="numeric" value={options.ubatchSize} onChange={(event) => updateOption("ubatchSize", event.target.value)} />
+                      </Field>
+
+                      <Field label="Threads">
+                        <input inputMode="numeric" placeholder="auto" value={options.threads} onChange={(event) => updateOption("threads", event.target.value)} />
+                      </Field>
+
+                      <Field label="Batch threads">
+                        <input inputMode="numeric" placeholder="same" value={options.threadsBatch} onChange={(event) => updateOption("threadsBatch", event.target.value)} />
+                      </Field>
+
+                      <Field label="Server slots">
+                        <input inputMode="numeric" value={options.parallelSlots} onChange={(event) => updateOption("parallelSlots", event.target.value)} />
+                      </Field>
+
+                      <Field label="Fit target MiB">
+                        <input inputMode="numeric" value={options.fitTarget} onChange={(event) => updateOption("fitTarget", event.target.value)} />
+                      </Field>
+
+                      <Field label="Cache RAM MiB">
+                        <input inputMode="numeric" value={options.cacheRam} onChange={(event) => updateOption("cacheRam", event.target.value)} />
+                      </Field>
+
+                      <Field label="Cache reuse">
+                        <input inputMode="numeric" placeholder="default" value={options.cacheReuse} onChange={(event) => updateOption("cacheReuse", event.target.value)} />
+                      </Field>
+
+                      <Field label="KV per slot">
+                        <input inputMode="numeric" placeholder="default" value={options.kvUnifiedPerSlot} onChange={(event) => updateOption("kvUnifiedPerSlot", event.target.value)} />
+                      </Field>
+
+                      <Field label="CPU MoE layers">
+                        <input inputMode="numeric" placeholder="none" value={options.nCpuMoe} onChange={(event) => updateOption("nCpuMoe", event.target.value)} />
+                      </Field>
+
+                      <Field label="Speculative / MTP">
+                        <select value={options.specType} onChange={(event) => updateOption("specType", event.target.value)}>
+                          <option value="none">none</option>
+                          <option value="draft-mtp">draft-mtp experimental</option>
+                          <option value="ngram-cache">ngram-cache</option>
+                          <option value="ngram-simple">ngram-simple</option>
+                        </select>
+                      </Field>
+
+                      <Field label="Draft max">
+                        <input inputMode="numeric" value={options.specDraftNMax} onChange={(event) => updateOption("specDraftNMax", event.target.value)} />
+                      </Field>
+
+                      <Field label="Draft min">
+                        <input inputMode="numeric" placeholder="default" value={options.specDraftNMin} onChange={(event) => updateOption("specDraftNMin", event.target.value)} />
+                      </Field>
+                    </div>
+
+                    <div className="toggle-controls experimental-toggles">
+                      <Toggle checked={options.kvOffload} label="KV offload" onChange={(checked) => updateOption("kvOffload", checked)} />
+                      <Toggle checked={options.kvUnified} label="Unified KV" onChange={(checked) => updateOption("kvUnified", checked)} />
+                      <Toggle checked={options.continuousBatching} label="Continuous batching" onChange={(checked) => updateOption("continuousBatching", checked)} />
+                      <Toggle checked={options.cachePrompt} label="Prompt cache" onChange={(checked) => updateOption("cachePrompt", checked)} />
+                      <Toggle checked={options.repack} label="Weight repack" onChange={(checked) => updateOption("repack", checked)} />
+                      <Toggle checked={options.swaFull} label="Full SWA cache" onChange={(checked) => updateOption("swaFull", checked)} />
+                      <Toggle checked={options.noHostBuffer} label="No host buffer" onChange={(checked) => updateOption("noHostBuffer", checked)} />
+                      <Toggle checked={options.cpuMoe} label="CPU MoE" onChange={(checked) => updateOption("cpuMoe", checked)} />
+                    </div>
+
+                    <Field label="Extra llama.cpp args" className="span-4">
+                      <textarea
+                        placeholder="--spec-default --threads-http 8"
+                        value={options.extraLlamaArgs}
+                        onChange={(event) => updateOption("extraLlamaArgs", event.target.value)}
+                      />
+                    </Field>
+                  </section>
+                ) : null}
 
                 {options.role === "host" ? (
                   <DistributionCard
@@ -1143,9 +1346,32 @@ function buildBrowserPreview(options: LaunchOptions): LaunchPreview {
     shell: options.targetOs === "windows" ? "Git Bash" : "/bin/bash",
     command: `${script} ${options.role === "host" ? "--model <selected.gguf>" : "--rpc-port " + options.rpcPort}`,
     environment: [],
-    requirements: [stack, "llama.cpp", options.role === "host" ? "GGUF model file" : "RPC worker mode", "LAN discovery"],
+    requirements: getPreviewRequirements(options, stack),
     notes: ["Browser design preview only; launch commands run inside the desktop app."],
   };
+}
+
+function getPreviewRequirements(options: LaunchOptions, stack: string) {
+  const requirements = [stack, "llama.cpp", options.role === "host" ? "GGUF model file" : "RPC worker mode"];
+
+  if (options.stack === "apple") {
+    requirements.push("TCP 50052 and UDP 50053 allowed between Macs");
+    if (options.role === "worker") {
+      requirements.push("Click Allow on macOS incoming-connection prompts");
+    }
+  } else {
+    requirements.push("LAN discovery");
+  }
+
+  return requirements;
+}
+
+function getMacFirewallHint(options: LaunchOptions) {
+  if (options.stack !== "apple" || options.targetOs !== "macos") return null;
+  if (options.role === "worker") {
+    return "macOS may ask to allow incoming connections for the RPC worker or python3 discovery helper. Click Allow, then keep this worker running.";
+  }
+  return "If a worker is not found after their first run, ask them to click Allow on any macOS incoming-connection prompt, then start discovery again.";
 }
 
 function getSystemStages(
@@ -1162,7 +1388,7 @@ function getSystemStages(
 
   const definitions = options.role === "host"
     ? [
-        { label: "Discover workers", detail: "Find reachable llama.cpp RPC workers on the LAN." },
+        { label: "Discover workers", detail: "Find reachable llama.cpp RPC workers on local or routed office subnets." },
         { label: "Prepare llama.cpp", detail: "Clone, update, and build llama.cpp with the selected backend." },
         { label: "Check model", detail: "Validate the selected GGUF model before launch." },
         { label: "Serve model", detail: "Start llama-server and wait until it is ready for requests." },
@@ -1170,8 +1396,8 @@ function getSystemStages(
     : [
         { label: "Prepare worker", detail: "Check local GPU, tools, and llama.cpp workspace." },
         { label: "Build RPC backend", detail: "Compile llama.cpp with RPC and the selected GPU backend." },
-        { label: "Advertise on LAN", detail: "Publish this machine so model starters can discover it." },
-        { label: "RPC online", detail: "Start the RPC server and listen for distributed inference work." },
+        { label: "Advertise on network", detail: "Publish this machine with Bonjour and routed UDP discovery." },
+        { label: "RPC online", detail: "Start RPC and allow macOS incoming-connection prompts when they appear." },
       ];
 
   const completeFlags = options.role === "host"

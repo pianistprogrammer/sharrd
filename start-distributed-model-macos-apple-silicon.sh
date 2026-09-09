@@ -22,12 +22,21 @@ set -euo pipefail
 #
 # Or:
 #   MODEL=/Users/me/Models/model.gguf ./start-distributed-model-macos-apple-silicon.sh
+#
+# If Bonjour/mDNS discovery is blocked by office subnetting, manually pass worker
+# RPC endpoint(s):
+#   RPC_SERVERS=<worker-ip>:50052 WORKER_RAM_GIBS=<worker-ram> ./start-distributed-model-macos-apple-silicon.sh /Users/me/Models/model.gguf
+# Or let the script scan routed office subnets for the RPC port:
+#   SCAN_SUBNETS=10.27.180.0/23 ./start-distributed-model-macos-apple-silicon.sh /Users/me/Models/model.gguf
 # ============================================================
 
 export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/Library/Apple/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
 LLAMA_DIR="${LLAMA_DIR:-$HOME/llama.cpp}"
 SERVICE_TYPE="_llamacpp-rpc._tcp"
+RPC_PORT="${RPC_PORT:-50052}"
+DISCOVERY_PORT="${DISCOVERY_PORT:-50053}"
+DISCOVERY_MAGIC="LLAMA_CPP_RPC_DISCOVER_V1"
 REPO="https://github.com/ggml-org/llama.cpp.git"
 
 MODEL="${1:-${MODEL:-}}"
@@ -36,6 +45,10 @@ SERVER_HOST="${SERVER_HOST:-127.0.0.1}"
 SERVER_PORT="${SERVER_PORT:-8080}"
 DISCOVERY_SECONDS="${DISCOVERY_SECONDS:-4}"
 MODE="${MODE:-server}"       # server or cli
+RPC_SERVERS="${RPC_SERVERS:-}"
+WORKER_RAM_GIBS="${WORKER_RAM_GIBS:-}"
+SCAN_RPC_WORKERS="${SCAN_RPC_WORKERS:-1}"
+SCAN_SUBNETS="${SCAN_SUBNETS:-}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -140,121 +153,358 @@ ensure_server_port_free() {
     fi
 }
 
-# ----- Discover workers -----
-echo "[1/5] Discovering Macs sharing llama.cpp RPC..."
-BROWSE_LOG="$(mktemp -t llama-rpc-browse.XXXXXX)"
+server_display_host() {
+    local bind="$1"
 
-dns-sd -B "$SERVICE_TYPE" local >"$BROWSE_LOG" 2>&1 &
-BROWSE_PID=$!
+    if [[ -z "$bind" || "$bind" == "0.0.0.0" || "$bind" == "::" ]]; then
+        local_ipv4s | head -n 1
+    else
+        printf '%s\n' "$bind"
+    fi
+}
 
-sleep "$DISCOVERY_SECONDS"
-kill "$BROWSE_PID" >/dev/null 2>&1 || true
-wait "$BROWSE_PID" >/dev/null 2>&1 || true
+local_ipv4s() {
+    ifconfig 2>/dev/null | awk '
+        /inet / && $2 != "127.0.0.1" {
+            print $2
+        }
+    ' | sort -u
+}
 
-# dns-sd browse output ends with the service instance name after domain/type.
-mapfile_compat() {
-    # Bash 3.2 ships with macOS; avoid mapfile.
-    while IFS= read -r line; do
-        [[ -n "$line" ]] && printf '%s\n' "$line"
+scan_prefix_for_rpc() {
+    local prefix="$1"
+    local port="$2"
+    local tmp
+    local host
+    local running=0
+
+    tmp="$(mktemp -t llama-rpc-scan.XXXXXX)"
+    for host in $(seq 1 254); do
+        (
+            if nc -z -G 1 "${prefix}.${host}" "$port" >/dev/null 2>&1; then
+                printf '%s:%s\t16\n' "${prefix}.${host}" "$port" >>"$tmp"
+            fi
+        ) &
+        running=$((running + 1))
+        if [[ "$running" -ge 64 ]]; then
+            wait
+            running=0
+        fi
     done
+    wait
+
+    sort -u "$tmp"
+    rm -f "$tmp"
 }
 
-SERVICE_NAMES="$(
-    awk '
-      / Add / && /_llamacpp-rpc\._tcp\./ {
-          # Instance name begins after "_llamacpp-rpc._tcp."
-          pos = index($0, "_llamacpp-rpc._tcp.")
-          if (pos > 0) {
-              s = substr($0, pos + length("_llamacpp-rpc._tcp."))
-              sub(/^[[:space:]]+/, "", s)
-              sub(/[[:space:]]+$/, "", s)
-              if (s != "") print s
-          }
-      }
-    ' "$BROWSE_LOG" | sort -u
-)"
-rm -f "$BROWSE_LOG"
+scan_prefixes_for_udp_rpc() {
+    local prefixes="$1"
+    local discovery_port="$2"
+    local fallback_rpc_port="$3"
 
-[[ -n "$SERVICE_NAMES" ]] || {
-    echo
-    echo "No worker Mac was discovered."
-    echo "Run share-gpu-worker-macos-apple-silicon.sh on the other Mac first."
-    echo "Both Macs must be on the same Bonjour/mDNS-capable LAN."
-    exit 1
+    if ! command -v python3 >/dev/null 2>&1; then
+        return 0
+    fi
+
+    python3 - "$prefixes" "$discovery_port" "$fallback_rpc_port" "$DISCOVERY_MAGIC" <<'PY'
+import re
+import socket
+import sys
+import time
+
+prefixes = [p for p in sys.argv[1].splitlines() if p]
+discovery_port = int(sys.argv[2])
+fallback_rpc_port = sys.argv[3]
+magic = sys.argv[4].encode()
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(0.2)
+
+for prefix in prefixes:
+    for i in range(1, 255):
+        try:
+            sock.sendto(magic, (f"{prefix}.{i}", discovery_port))
+        except OSError:
+            pass
+
+seen = {}
+end = time.time() + 3
+while time.time() < end:
+    try:
+        data, addr = sock.recvfrom(4096)
+    except socket.timeout:
+        continue
+    text = data.decode("utf-8", "replace")
+    if not text.startswith("LLAMA_CPP_RPC_V1|"):
+        continue
+    parts = text.split("|", 3)
+    if len(parts) != 4:
+        continue
+    rpc_port = parts[2] or fallback_rpc_port
+    metadata = parts[3]
+    ram = "16"
+    match = re.search(r"ram_gib=([0-9]+)", metadata)
+    if match:
+        ram = match.group(1)
+    endpoint = f"{addr[0]}:{rpc_port}"
+    seen[endpoint] = ram
+
+for endpoint in sorted(seen):
+    print(f"{endpoint}\t{seen[endpoint]}")
+PY
 }
 
-echo "Found worker service(s):"
-printf '%s\n' "$SERVICE_NAMES" | sed 's/^/  - /'
-echo
+apply_scanned_workers() {
+    local scanned="$1"
+    local endpoint
+    local ram
 
-# Resolve each Bonjour service to host + port.
-RPC_ENDPOINTS=""
-WORKER_RAM_GIBS=""
-while IFS= read -r svc; do
-    [[ -n "$svc" ]] || continue
-    RESOLVE_LOG="$(mktemp -t llama-rpc-resolve.XXXXXX)"
+    [[ -n "$scanned" ]] || return 1
 
-    dns-sd -L "$svc" "$SERVICE_TYPE" local >"$RESOLVE_LOG" 2>&1 &
-    RESOLVE_PID=$!
-    sleep 2
-    kill "$RESOLVE_PID" >/dev/null 2>&1 || true
-    wait "$RESOLVE_PID" >/dev/null 2>&1 || true
+    RPC_ENDPOINTS=""
+    WORKER_RAM_GIBS=""
+    while IFS=$'\t' read -r endpoint ram; do
+        [[ -n "$endpoint" ]] || continue
+        [[ "$ram" =~ ^[0-9]+$ ]] || ram="16"
 
-    # Typical dns-sd line:
-    # <instance>._llamacpp-rpc._tcp.local. can be reached at host.local.:50052 (...)
-    TARGET="$(
+        if [[ -z "$RPC_ENDPOINTS" ]]; then
+            RPC_ENDPOINTS="$endpoint"
+            WORKER_RAM_GIBS="$ram"
+        else
+            RPC_ENDPOINTS="$RPC_ENDPOINTS,$endpoint"
+            WORKER_RAM_GIBS="$WORKER_RAM_GIBS,$ram"
+        fi
+    done <<< "$scanned"
+
+    [[ -n "$RPC_ENDPOINTS" ]]
+}
+
+scan_specs_to_prefixes() {
+    local specs="$1"
+    local old_ifs="$IFS"
+    local spec
+    local a b c base end
+
+    IFS=','
+    for spec in $specs; do
+        spec="$(printf '%s' "$spec" | tr -d '[:space:]')"
+        [[ -n "$spec" ]] || continue
+
+        if [[ "$spec" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            printf '%s\n' "$spec"
+        elif [[ "$spec" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)\.0/24$ ]]; then
+            printf '%s.%s.%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+        elif [[ "$spec" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)\.0/23$ ]]; then
+            a="${BASH_REMATCH[1]}"
+            b="${BASH_REMATCH[2]}"
+            c="${BASH_REMATCH[3]}"
+            base=$((c & 254))
+            end=$((base + 1))
+            printf '%s.%s.%s\n' "$a" "$b" "$base"
+            printf '%s.%s.%s\n' "$a" "$b" "$end"
+        else
+            echo "WARNING: unsupported SCAN_SUBNETS entry '$spec' (use 10.27.180.0/23, 10.27.180.0/24, or 10.27.180)." >&2
+        fi
+    done
+    IFS="$old_ifs"
+}
+
+default_scan_prefixes() {
+    local ip
+    local a b c d pair
+
+    while IFS= read -r ip; do
+        [[ "$ip" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || continue
+        a="${BASH_REMATCH[1]}"
+        b="${BASH_REMATCH[2]}"
+        c="${BASH_REMATCH[3]}"
+        d="${BASH_REMATCH[4]}"
+        pair=$((c ^ 1))
+        printf '%s.%s.%s\n' "$a" "$b" "$c"
+        printf '%s.%s.%s\n' "$a" "$b" "$pair"
+    done < <(local_ipv4s)
+}
+
+scan_for_rpc_workers() {
+    local prefixes
+    local prefix
+    local found=""
+    local scan_result
+
+    if [[ "$SCAN_RPC_WORKERS" != "1" ]]; then
+        return 0
+    fi
+    if ! command -v nc >/dev/null 2>&1; then
+        echo "Cannot scan routed subnets because nc is unavailable."
+        return 0
+    fi
+
+    if [[ -n "$SCAN_SUBNETS" ]]; then
+        prefixes="$(scan_specs_to_prefixes "$SCAN_SUBNETS" | sort -u)"
+    else
+        prefixes="$(default_scan_prefixes | sort -u)"
+    fi
+
+    [[ -n "$prefixes" ]] || return 0
+
+    echo >&2
+    echo "No Bonjour worker found; scanning routed subnet prefixes for discovery UDP $DISCOVERY_PORT and RPC TCP $RPC_PORT..." >&2
+    printf '%s\n' "$prefixes" | sed 's/^/  - /' >&2
+
+    found="$(scan_prefixes_for_udp_rpc "$prefixes" "$DISCOVERY_PORT" "$RPC_PORT")"
+    if [[ -n "$found" ]]; then
+        printf '%s\n' "$found" | sort -u
+        return 0
+    fi
+
+    echo "No worker answered UDP discovery; falling back to TCP port scan. Worker RAM will default to 16 GiB unless WORKER_RAM_GIBS is set." >&2
+
+    while IFS= read -r prefix; do
+        [[ -n "$prefix" ]] || continue
+        scan_result="$(scan_prefix_for_rpc "$prefix" "$RPC_PORT")"
+        if [[ -n "$scan_result" ]]; then
+            if [[ -z "$found" ]]; then
+                found="$scan_result"
+            else
+                found="$found
+$scan_result"
+            fi
+        fi
+    done <<< "$prefixes"
+
+    if [[ -n "$found" ]]; then
+        printf '%s\n' "$found" | sort -u
+    fi
+}
+
+# ----- Discover workers -----
+if [[ -n "$RPC_SERVERS" ]]; then
+    echo "[1/5] Using manual RPC worker endpoint(s)..."
+    RPC_ENDPOINTS="$RPC_SERVERS"
+    IFS=',' read -r FIRST_ENDPOINT _REST <<< "$RPC_ENDPOINTS"
+    FIRST_HOST="${FIRST_ENDPOINT%:*}"
+    FIRST_PORT="${FIRST_ENDPOINT##*:}"
+    echo "Checking RPC TCP connection to $FIRST_ENDPOINT..."
+    wait_for_tcp "$FIRST_HOST" "$FIRST_PORT" "$FIRST_ENDPOINT" || die "Manual RPC endpoint is not reachable: $FIRST_ENDPOINT"
+
+    RPC_COUNT_FOR_DEFAULT_RAM="$(awk -v endpoints="$RPC_ENDPOINTS" 'BEGIN { print split(endpoints, parts, ",") }')"
+    if [[ -z "$WORKER_RAM_GIBS" ]]; then
+        WORKER_RAM_GIBS="$(awk -v n="$RPC_COUNT_FOR_DEFAULT_RAM" 'BEGIN { for (i=1; i<=n; i++) { printf "%s16", (i == 1 ? "" : ",") } }')"
+    fi
+else
+    echo "[1/5] Discovering Macs sharing llama.cpp RPC..."
+    BROWSE_LOG="$(mktemp -t llama-rpc-browse.XXXXXX)"
+
+    dns-sd -B "$SERVICE_TYPE" local >"$BROWSE_LOG" 2>&1 &
+    BROWSE_PID=$!
+
+    sleep "$DISCOVERY_SECONDS"
+    kill "$BROWSE_PID" >/dev/null 2>&1 || true
+    wait "$BROWSE_PID" >/dev/null 2>&1 || true
+
+    SERVICE_NAMES="$(
         awk '
-          /can be reached at/ {
-              for (i=1; i<=NF; i++) {
-                  if ($i == "at" && (i+1) <= NF) {
-                      x=$(i+1)
-                      sub(/\.$/, "", x)
-                      print x
-                      exit
-                  }
+          / Add / && /_llamacpp-rpc\._tcp\./ {
+              pos = index($0, "_llamacpp-rpc._tcp.")
+              if (pos > 0) {
+                  s = substr($0, pos + length("_llamacpp-rpc._tcp."))
+                  sub(/^[[:space:]]+/, "", s)
+                  sub(/[[:space:]]+$/, "", s)
+                  if (s != "") print s
               }
           }
-        ' "$RESOLVE_LOG"
+        ' "$BROWSE_LOG" | sort -u
     )"
-    WORKER_RAM_GIB="$(grep -Eo 'ram_gib=[0-9]+' "$RESOLVE_LOG" | head -n 1 | cut -d= -f2 || true)"
+    rm -f "$BROWSE_LOG"
 
-    rm -f "$RESOLVE_LOG"
-
-    if [[ -n "$TARGET" ]]; then
-        # TARGET is usually host.local.:port or host.local:port.
-        TARGET="${TARGET%.}"
-        TARGET="${TARGET/.:/:}"
-        TARGET_HOST="${TARGET%:*}"
-        TARGET_PORT="${TARGET##*:}"
-        TARGET_IP="$(resolve_ipv4 "$TARGET_HOST" || true)"
-        ENDPOINT_HOST="${TARGET_IP:-$TARGET_HOST}"
-        ENDPOINT="$ENDPOINT_HOST:$TARGET_PORT"
-
-        echo "Resolved $svc -> $TARGET"
-        if [[ -n "$TARGET_IP" && "$TARGET_IP" != "$TARGET_HOST" ]]; then
-            echo "Using reachable IPv4 endpoint: $ENDPOINT"
+    if [[ -z "$SERVICE_NAMES" ]]; then
+        echo
+        echo "No worker Mac was discovered."
+        echo "Run share-gpu-worker-macos-apple-silicon.sh on the other Mac first."
+        echo "Both Macs must be on the same Bonjour/mDNS-capable LAN."
+        SCANNED_WORKERS="$(scan_for_rpc_workers)"
+        if ! apply_scanned_workers "$SCANNED_WORKERS"; then
+            echo "If the worker Mac showed a macOS incoming-connection prompt, click Allow there and run this command again."
+            echo "If direct TCP works, retry with: RPC_SERVERS=<worker-ip>:50052 WORKER_RAM_GIBS=<worker-ram> $0 <model.gguf>"
+            exit 1
         fi
+    else
 
-        echo "Checking RPC TCP connection to $ENDPOINT..."
-        if wait_for_tcp "$ENDPOINT_HOST" "$TARGET_PORT" "$ENDPOINT"; then
-            if [[ ! "$WORKER_RAM_GIB" =~ ^[0-9]+$ ]]; then
-                WORKER_RAM_GIB="16"
-            fi
+        echo "Found worker service(s):"
+        printf '%s\n' "$SERVICE_NAMES" | sed 's/^/  - /'
+        echo
 
-            if [[ -z "$RPC_ENDPOINTS" ]]; then
-                RPC_ENDPOINTS="$ENDPOINT"
-                WORKER_RAM_GIBS="$WORKER_RAM_GIB"
-            else
-                RPC_ENDPOINTS="$RPC_ENDPOINTS,$ENDPOINT"
-                WORKER_RAM_GIBS="$WORKER_RAM_GIBS,$WORKER_RAM_GIB"
+        # Resolve each Bonjour service to host + port.
+        RPC_ENDPOINTS=""
+        WORKER_RAM_GIBS=""
+        while IFS= read -r svc; do
+            [[ -n "$svc" ]] || continue
+            RESOLVE_LOG="$(mktemp -t llama-rpc-resolve.XXXXXX)"
+
+            dns-sd -L "$svc" "$SERVICE_TYPE" local >"$RESOLVE_LOG" 2>&1 &
+            RESOLVE_PID=$!
+            sleep 2
+            kill "$RESOLVE_PID" >/dev/null 2>&1 || true
+            wait "$RESOLVE_PID" >/dev/null 2>&1 || true
+
+            TARGET="$(
+                awk '
+                  /can be reached at/ {
+                      for (i=1; i<=NF; i++) {
+                          if ($i == "at" && (i+1) <= NF) {
+                              x=$(i+1)
+                              sub(/\.$/, "", x)
+                              print x
+                              exit
+                          }
+                      }
+                  }
+                ' "$RESOLVE_LOG"
+            )"
+            WORKER_RAM_GIB="$(grep -Eo 'ram_gib=[0-9]+' "$RESOLVE_LOG" | head -n 1 | cut -d= -f2 || true)"
+
+            rm -f "$RESOLVE_LOG"
+
+            if [[ -n "$TARGET" ]]; then
+                TARGET="${TARGET%.}"
+                TARGET="${TARGET/.:/:}"
+                TARGET_HOST="${TARGET%:*}"
+                TARGET_PORT="${TARGET##*:}"
+                TARGET_IP="$(resolve_ipv4 "$TARGET_HOST" || true)"
+                ENDPOINT_HOST="${TARGET_IP:-$TARGET_HOST}"
+                ENDPOINT="$ENDPOINT_HOST:$TARGET_PORT"
+
+                echo "Resolved $svc -> $TARGET"
+                if [[ -n "$TARGET_IP" && "$TARGET_IP" != "$TARGET_HOST" ]]; then
+                    echo "Using reachable IPv4 endpoint: $ENDPOINT"
+                fi
+
+                echo "Checking RPC TCP connection to $ENDPOINT..."
+                if wait_for_tcp "$ENDPOINT_HOST" "$TARGET_PORT" "$ENDPOINT"; then
+                    if [[ ! "$WORKER_RAM_GIB" =~ ^[0-9]+$ ]]; then
+                        WORKER_RAM_GIB="16"
+                    fi
+
+                    if [[ -z "$RPC_ENDPOINTS" ]]; then
+                        RPC_ENDPOINTS="$ENDPOINT"
+                        WORKER_RAM_GIBS="$WORKER_RAM_GIB"
+                    else
+                        RPC_ENDPOINTS="$RPC_ENDPOINTS,$ENDPOINT"
+                        WORKER_RAM_GIBS="$WORKER_RAM_GIBS,$WORKER_RAM_GIB"
+                    fi
+                else
+                    echo "WARNING: $ENDPOINT was discovered by Bonjour but did not accept TCP connections on port $TARGET_PORT. Skipping it."
+                fi
             fi
-        else
-            echo "WARNING: $ENDPOINT was discovered by Bonjour but did not accept TCP connections on port $TARGET_PORT. Skipping it."
+        done <<< "$SERVICE_NAMES"
+
+        if [[ -z "$RPC_ENDPOINTS" ]]; then
+            echo "Worker(s) were visible in Bonjour but no reachable RPC TCP endpoint was found. Trying routed subnet scan."
+            SCANNED_WORKERS="$(scan_for_rpc_workers)"
+            apply_scanned_workers "$SCANNED_WORKERS" || die "No reachable RPC worker was found. If the worker Mac showed a macOS incoming-connection prompt, click Allow there and run this command again."
         fi
     fi
-done <<< "$SERVICE_NAMES"
-
-[[ -n "$RPC_ENDPOINTS" ]] || die "Worker(s) were visible in Bonjour but no reachable RPC TCP endpoint was found."
+fi
 
 echo
 echo "RPC worker(s): $RPC_ENDPOINTS"
@@ -358,7 +608,11 @@ if [[ "$MODE" == "cli" ]]; then
     exec "$CLI_EXE" "${COMMON_ARGS[@]}"
 else
     ensure_server_port_free "$SERVER_PORT"
-    echo "llama-server: http://${SERVER_HOST}:${SERVER_PORT}"
+    DISPLAY_SERVER_HOST="$(server_display_host "$SERVER_HOST")"
+    echo "llama-server bind: ${SERVER_HOST}:${SERVER_PORT}"
+    if [[ -n "$DISPLAY_SERVER_HOST" ]]; then
+        echo "llama-server URL : http://${DISPLAY_SERVER_HOST}:${SERVER_PORT}"
+    fi
     echo
     SERVER_ARGS=(
         "${COMMON_ARGS[@]}"

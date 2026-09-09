@@ -467,7 +467,8 @@ fn requirements_for(options: &LaunchOptions) -> Vec<String> {
             "Apple Silicon Mac".to_string(),
             "Xcode Command Line Tools".to_string(),
             "git, cmake, and dns-sd".to_string(),
-            "Trusted LAN with Bonjour/mDNS enabled".to_string(),
+            "TCP 50052 and UDP 50053 allowed between Macs".to_string(),
+            "Allow macOS incoming-connection prompts for the RPC worker".to_string(),
         ],
         ("nvidia", "windows") => vec![
             "NVIDIA driver and CUDA Toolkit".to_string(),
@@ -493,7 +494,8 @@ fn notes_for(options: &LaunchOptions) -> Vec<String> {
         notes.push("This machine starts llama-server or llama-cli and joins discovered workers.".to_string());
     }
     if options.stack == "apple" {
-        notes.push("Apple workers are discovered with Bonjour/mDNS.".to_string());
+        notes.push("Apple workers use Bonjour first, then routed UDP/TCP discovery for nearby office subnets.".to_string());
+        notes.push("On the worker Mac, click Allow if macOS asks to permit incoming connections; the first discovery attempt may trigger that prompt.".to_string());
     }
     if options.stack == "nvidia" {
         notes.push("NVIDIA workers are discovered with UDP broadcast, with manual RPC endpoints available as a fallback.".to_string());
