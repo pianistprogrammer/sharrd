@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{Ipv4Addr, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -41,6 +41,7 @@ struct LaunchOptions {
     use_all_workers: bool,
     use_cache: bool,
     manual_rpc_servers: String,
+    scan_subnets: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -157,6 +158,7 @@ fn local_server_host() -> String {
 
 #[tauri::command]
 fn build_preview(options: LaunchOptions) -> Result<LaunchPreview, String> {
+    validate_scan_subnets(&options.scan_subnets)?;
     let (_script_name, _) = script_for(&options)?;
     let shell = shell_for(&options);
     let environment = env_for(&options);
@@ -181,6 +183,7 @@ fn start_session(
     state: tauri::State<'_, SessionRegistry>,
     options: LaunchOptions,
 ) -> Result<String, String> {
+    validate_scan_subnets(&options.scan_subnets)?;
     if options.role == "host" && options.model_path.trim().is_empty() {
         return Err("Choose the GGUF model path before starting the model.".to_string());
     }
@@ -376,6 +379,7 @@ fn env_for(options: &LaunchOptions) -> Vec<EnvVar> {
         if options.use_cache { "1" } else { "0" },
     );
     push_env(&mut env, "RPC_SERVERS", &options.manual_rpc_servers);
+    push_env(&mut env, "SCAN_SUBNETS", &options.scan_subnets);
     env
 }
 
@@ -451,6 +455,21 @@ fn launch_path_for(options: &LaunchOptions) -> String {
         .unwrap_or(current_path)
 }
 
+fn validate_scan_subnets(value: &str) -> Result<(), String> {
+    for subnet in value.split(',').map(str::trim).filter(|item| !item.is_empty()) {
+        let Some((address, prefix)) = subnet.split_once('/') else {
+            return Err(format!("Remote subnet '{subnet}' must be an IPv4 /23 or /24 network."));
+        };
+        address
+            .parse::<Ipv4Addr>()
+            .map_err(|_| format!("Remote subnet '{subnet}' is not valid IPv4."))?;
+        if prefix != "23" && prefix != "24" {
+            return Err(format!("Remote subnet '{subnet}' must use a /23 or /24 prefix."));
+        }
+    }
+    Ok(())
+}
+
 fn push_env(env: &mut Vec<EnvVar>, key: &str, value: &str) {
     let trimmed = value.trim();
     if !trimmed.is_empty() {
@@ -498,7 +517,7 @@ fn notes_for(options: &LaunchOptions) -> Vec<String> {
         notes.push("On the worker Mac, click Allow if macOS asks to permit incoming connections; the first discovery attempt may trigger that prompt.".to_string());
     }
     if options.stack == "nvidia" {
-        notes.push("NVIDIA workers are discovered with UDP broadcast, with manual RPC endpoints available as a fallback.".to_string());
+        notes.push("NVIDIA workers use local UDP broadcast plus any configured remote /23 or /24 subnet scans, with manual RPC endpoints as a fallback.".to_string());
     }
     notes.push("Use this only on a trusted local network; llama.cpp RPC should not be exposed to the Internet.".to_string());
     notes
@@ -629,4 +648,44 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running Sharrd");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cross_subnet_ranges_are_forwarded_to_start_scripts() {
+        let options: LaunchOptions = serde_json::from_value(serde_json::json!({
+            "role": "host",
+            "stack": "nvidia",
+            "targetOs": "linux",
+            "shellPath": "",
+            "llamaDir": "",
+            "modelPath": "/models/model.gguf",
+            "context": "4096",
+            "serverHost": "0.0.0.0",
+            "serverPort": "8080",
+            "rpcPort": "50052",
+            "discoveryPort": "50053",
+            "discoverySeconds": "4",
+            "mode": "server",
+            "useAllWorkers": true,
+            "useCache": true,
+            "manualRpcServers": "",
+            "scanSubnets": "10.27.180.0/23, 172.20.4.0/24"
+        }))
+        .unwrap();
+
+        let environment = env_for(&options);
+        assert!(environment.iter().any(|item| {
+            item.key == "SCAN_SUBNETS" && item.value == "10.27.180.0/23, 172.20.4.0/24"
+        }));
+    }
+
+    #[test]
+    fn cross_subnet_ranges_reject_unsupported_prefixes() {
+        let error = validate_scan_subnets("10.27.180.0/16").unwrap_err();
+        assert!(error.contains("/23 or /24"));
+    }
 }

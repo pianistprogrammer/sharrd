@@ -22,6 +22,7 @@ LLAMA_DIR="${LLAMA_DIR:-/c/llama.cpp}"
 RPC_PORT="${RPC_PORT:-50052}"
 DISCOVERY_PORT="${DISCOVERY_PORT:-50053}"
 USE_CACHE="${USE_CACHE:-1}"
+SCAN_SUBNETS="${SCAN_SUBNETS:-}"
 
 REPO="https://github.com/ggml-org/llama.cpp.git"
 DISCOVERY_MAGIC="LLAMA_CPP_RPC_DISCOVER_V1"
@@ -108,15 +109,33 @@ if [[ -z "$RPC_EXE" ]]; then
 fi
 
 echo
-echo "[5/6] Configuring Windows Firewall for LocalSubnet only"
+FIREWALL_REMOTE_ADDRESSES="LocalSubnet"
+if [[ -n "$SCAN_SUBNETS" ]]; then
+    while IFS= read -r subnet; do
+        subnet="$(printf '%s' "$subnet" | tr -d '[:space:]')"
+        [[ -n "$subnet" ]] || continue
+        if [[ ! "$subnet" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})/(23|24)$ ]]; then
+            echo "ERROR: Allowed host subnet '$subnet' must be an IPv4 /23 or /24 network."
+            exit 1
+        fi
+        for octet in "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"; do
+            if (( 10#$octet > 255 )); then
+                echo "ERROR: Allowed host subnet '$subnet' is not valid IPv4."
+                exit 1
+            fi
+        done
+        FIREWALL_REMOTE_ADDRESSES+=",$subnet"
+    done < <(printf '%s' "$SCAN_SUBNETS" | tr ',' '\n')
+fi
+
+echo "[5/6] Configuring Windows Firewall for: $FIREWALL_REMOTE_ADDRESSES"
 RULE_RPC="llama.cpp RPC TCP ${RPC_PORT}"
 RULE_DISC="llama.cpp Discovery UDP ${DISCOVERY_PORT}"
-
 FW_CMD="\$ErrorActionPreference='Stop'; \
 Get-NetFirewallRule -DisplayName '${RULE_RPC}' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue; \
 Get-NetFirewallRule -DisplayName '${RULE_DISC}' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue; \
-New-NetFirewallRule -DisplayName '${RULE_RPC}' -Direction Inbound -Protocol TCP -LocalPort ${RPC_PORT} -RemoteAddress LocalSubnet -Action Allow | Out-Null; \
-New-NetFirewallRule -DisplayName '${RULE_DISC}' -Direction Inbound -Protocol UDP -LocalPort ${DISCOVERY_PORT} -RemoteAddress LocalSubnet -Action Allow | Out-Null"
+New-NetFirewallRule -DisplayName '${RULE_RPC}' -Direction Inbound -Protocol TCP -LocalPort ${RPC_PORT} -RemoteAddress ${FIREWALL_REMOTE_ADDRESSES} -Action Allow | Out-Null; \
+New-NetFirewallRule -DisplayName '${RULE_DISC}' -Direction Inbound -Protocol UDP -LocalPort ${DISCOVERY_PORT} -RemoteAddress ${FIREWALL_REMOTE_ADDRESSES} -Action Allow | Out-Null"
 
 powershell.exe -NoProfile -Command \
   "Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList '-NoProfile','-Command',\"$FW_CMD\""

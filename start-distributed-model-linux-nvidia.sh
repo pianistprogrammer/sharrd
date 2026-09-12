@@ -26,6 +26,7 @@ SERVER_PORT="${SERVER_PORT:-8080}"
 SERVER_BIND="${SERVER_BIND:-0.0.0.0}"
 MODE="${MODE:-server}"
 USE_ALL_WORKERS="${USE_ALL_WORKERS:-1}"
+SCAN_SUBNETS="${SCAN_SUBNETS:-}"
 REPO="https://github.com/ggml-org/llama.cpp.git"
 
 need_cmd() {
@@ -142,29 +143,48 @@ if [[ -z "$LOCAL_VRAM_SPLIT" ]]; then
 fi
 echo
 
-echo "[2/6] Discovering llama.cpp RPC workers on the local subnet"
+echo "[2/6] Discovering llama.cpp RPC workers locally and on configured remote subnets"
 if [[ -n "${RPC_SERVERS:-}" ]]; then
     RPC_LIST="$RPC_SERVERS"
     WORKER_VRAM_SPLIT=""
     echo "Using manual RPC endpoint(s): $RPC_LIST"
 else
-    DISCOVERED="$(python3 - "$DISCOVERY_PORT" "$DISCOVERY_SECONDS" <<'PY'
+    DISCOVERED="$(python3 - "$DISCOVERY_PORT" "$DISCOVERY_SECONDS" "$SCAN_SUBNETS" <<'PY'
+import ipaddress
 import socket
 import sys
 import time
 
 port = int(sys.argv[1])
 seconds = float(sys.argv[2])
+scan_subnets = sys.argv[3]
 magic = b"LLAMA_CPP_RPC_DISCOVER_V1"
 seen = {}
+targets = ["255.255.255.255"]
+
+for spec in scan_subnets.replace(" ", "").split(","):
+    if not spec:
+        continue
+    try:
+        network = ipaddress.ip_network(spec, strict=False)
+    except ValueError as error:
+        raise SystemExit(f"ERROR: Invalid remote subnet '{spec}': {error}")
+    if network.version != 4 or network.prefixlen not in (23, 24):
+        raise SystemExit(f"ERROR: Remote subnet '{spec}' must be an IPv4 /23 or /24 network")
+    targets.extend(str(address) for address in network.hosts())
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 sock.settimeout(0.3)
 
-for _ in range(2):
-    sock.sendto(magic, ("255.255.255.255", port))
-    time.sleep(0.15)
+for target in dict.fromkeys(targets):
+    try:
+        sock.sendto(magic, (target, port))
+    except OSError:
+        pass
+
+time.sleep(0.15)
+sock.sendto(magic, ("255.255.255.255", port))
 
 end = time.time() + seconds
 while time.time() < end:
@@ -187,7 +207,7 @@ PY
     if [[ -z "$DISCOVERED" ]]; then
         echo
         echo "ERROR: No RPC worker answered automatic discovery."
-        echo "Start a worker first, confirm both machines are on the same LAN, or set RPC_SERVERS manually."
+        echo "Start a worker first, set SCAN_SUBNETS to remote /23 or /24 networks, or set RPC_SERVERS manually."
         exit 1
     fi
 

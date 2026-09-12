@@ -5,3 +5,4 @@ src-tauri/gen/
 .DS_Store
 *.log
 AuthKey_*.p8
+.pi-todos.json

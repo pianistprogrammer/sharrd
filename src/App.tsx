@@ -53,6 +53,7 @@ type LaunchOptions = {
   useAllWorkers: boolean;
   useCache: boolean;
   manualRpcServers: string;
+  scanSubnets: string;
   experimentalPerf: boolean;
   flashAttention: string;
   kvCacheTypeK: string;
@@ -158,6 +159,7 @@ const defaultOptions: LaunchOptions = {
   useAllWorkers: true,
   useCache: true,
   manualRpcServers: "",
+  scanSubnets: "",
   experimentalPerf: false,
   flashAttention: "auto",
   kvCacheTypeK: "f16",
@@ -236,7 +238,10 @@ function getSystemTheme(): "dark" | "light" {
 }
 
 function App() {
-  const [options, setOptions] = useState<LaunchOptions>(defaultOptions);
+  const [options, setOptions] = useState<LaunchOptions>(() => ({
+    ...defaultOptions,
+    scanSubnets: window.localStorage.getItem("sharrd.scanSubnets") ?? "",
+  }));
   const [hostInfo, setHostInfo] = useState<HostInfo | null>(null);
   const [preview, setPreview] = useState<LaunchPreview | null>(null);
   const [logs, setLogs] = useState<LogEvent[]>([]);
@@ -288,6 +293,9 @@ function App() {
       });
   }, []);
 
+  useEffect(() => {
+    window.localStorage.setItem("sharrd.scanSubnets", options.scanSubnets);
+  }, [options.scanSubnets]);
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: light)");
     const updateSystemTheme = () => setSystemTheme(media.matches ? "light" : "dark");
@@ -836,6 +844,20 @@ function App() {
                       onChange={(event) => updateOption("discoveryPort", event.target.value)}
                     />
                   </Field>
+                  {options.role === "host" || options.targetOs === "windows" ? (
+                    <Field
+                      label={options.role === "host" ? "Remote worker subnet(s)" : "Allowed host subnet(s)"}
+                      className="span-4"
+                    >
+                      <input
+                        aria-label="Remote subnets for cross-subnet RPC"
+                        placeholder="10.27.180.0/23, 172.20.4.0/24"
+                        title="Comma-separated IPv4 /23 or /24 networks. Windows workers use these for scoped firewall access."
+                        value={options.scanSubnets}
+                        onChange={(event) => updateOption("scanSubnets", event.target.value)}
+                      />
+                    </Field>
+                  ) : null}
 
                   {options.stack === "nvidia" && options.role === "host" ? (
                     <Field label="Manual RPC endpoints" className="span-4">

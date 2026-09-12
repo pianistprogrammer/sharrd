@@ -27,6 +27,7 @@ SERVER_PORT="${SERVER_PORT:-8080}"
 SERVER_BIND="${SERVER_BIND:-0.0.0.0}"
 MODE="${MODE:-server}"          # server or cli
 USE_ALL_WORKERS="${USE_ALL_WORKERS:-1}"
+SCAN_SUBNETS="${SCAN_SUBNETS:-}"
 
 REPO="https://github.com/ggml-org/llama.cpp.git"
 
@@ -142,7 +143,7 @@ if [[ -z "$LOCAL_VRAM_SPLIT" ]]; then
 fi
 echo
 
-echo "[2/6] Discovering llama.cpp RPC workers on the local subnet"
+echo "[2/6] Discovering llama.cpp RPC workers locally and on configured remote subnets"
 WORKER_VRAM_SPLIT=""
 
 if [[ -n "${RPC_SERVERS:-}" ]]; then
@@ -155,7 +156,8 @@ else
     cat > "$DISCOVERY_PS1" <<'POWERSHELL'
 param(
     [int]$DiscoveryPort = 50053,
-    [int]$Seconds = 3
+    [int]$Seconds = 3,
+    [string]$ScanSubnets = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -166,22 +168,46 @@ $udp.EnableBroadcast = $true
 $udp.Client.ReceiveTimeout = 300
 
 $payload = [System.Text.Encoding]::UTF8.GetBytes($magic)
+$targets = New-Object System.Collections.Generic.List[string]
+$targets.Add([System.Net.IPAddress]::Broadcast.ToString())
 
-# Limited broadcast works on the common same-subnet office LAN case.
-[void]$udp.Send(
-    $payload,
-    $payload.Length,
-    [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Broadcast, $DiscoveryPort)
-)
+foreach ($spec in $ScanSubnets.Split(",", [System.StringSplitOptions]::RemoveEmptyEntries)) {
+    $value = $spec.Trim()
+    if ($value -notmatch '^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3}/(23|24)$') {
+        throw "Remote subnet '$value' must be an IPv4 /23 or /24 network"
+    }
 
-# Send a few times to make discovery less sensitive to packet loss.
+    $a = [int]$Matches[1]
+    $b = [int]$Matches[2]
+    $c = [int]$Matches[3]
+    $prefix = [int]$Matches[4]
+    if ($a -gt 255 -or $b -gt 255 -or $c -gt 255) {
+        throw "Remote subnet '$value' is not valid IPv4"
+    }
+
+    $firstThirdOctet = if ($prefix -eq 23) { $c -band 254 } else { $c }
+    $lastThirdOctet = if ($prefix -eq 23) { $firstThirdOctet + 1 } else { $firstThirdOctet }
+    foreach ($thirdOctet in $firstThirdOctet..$lastThirdOctet) {
+        foreach ($hostOctet in 1..254) {
+            $targets.Add("$a.$b.$thirdOctet.$hostOctet")
+        }
+    }
+}
+
+foreach ($target in ($targets | Select-Object -Unique)) {
+    try {
+        [void]$udp.Send($payload, $payload.Length, $target, $DiscoveryPort)
+    }
+    catch [System.Net.Sockets.SocketException] {
+    }
+}
+
 Start-Sleep -Milliseconds 150
 [void]$udp.Send(
     $payload,
     $payload.Length,
     [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Broadcast, $DiscoveryPort)
 )
-
 $end = [DateTime]::UtcNow.AddSeconds($Seconds)
 $seen = @{}
 
@@ -218,7 +244,7 @@ POWERSHELL
     DISCOVERY_WIN="$(cygpath -w "$DISCOVERY_PS1")"
 
     DISCOVERED="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$DISCOVERY_WIN" \
-      -DiscoveryPort "$DISCOVERY_PORT" -Seconds "$DISCOVERY_SECONDS" | tr -d '\r' || true)"
+      -DiscoveryPort "$DISCOVERY_PORT" -Seconds "$DISCOVERY_SECONDS" -ScanSubnets "$SCAN_SUBNETS" | tr -d '\r' || true)"
 
     if [[ -z "$DISCOVERED" ]]; then
         echo
@@ -226,9 +252,9 @@ POWERSHELL
         echo
         echo "Check that:"
         echo "  1. share-gpu-worker-windows-nvidia.sh is running on the other PC,"
-        echo "  2. both PCs are on the same LAN/VLAN,"
-        echo "  3. Windows Firewall considers them part of LocalSubnet,"
-        echo "  4. your network does not block local UDP broadcast."
+        echo "  2. SCAN_SUBNETS includes the worker's remote /23 or /24 network when needed,"
+        echo "  3. Windows Firewall allows the host network,"
+        echo "  4. routing permits UDP discovery and TCP RPC between subnets."
         echo
         echo "You may override discovery manually as a fallback:"
         echo '  RPC_SERVERS=192.168.1.11:50052 ./start-distributed-model-windows-nvidia.sh'

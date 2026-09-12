@@ -14,7 +14,7 @@ set -euo pipefail
 #   - advertises itself on Bonjour/mDNS so the main Mac
 #     can discover it without knowing the IP address
 #
-# Keep this terminal open while the other Mac is using it.
+# Set BACKGROUND=1 to keep the worker running after this terminal closes.
 # ============================================================
 
 export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/Library/Apple/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
@@ -67,6 +67,19 @@ ensure_rpc_port_free() {
 
 [[ "$(uname -s)" == "Darwin" ]] || die "This script is macOS-only."
 [[ "$(uname -m)" == "arm64" ]] || die "Apple Silicon (arm64) is required."
+
+if [[ "${BACKGROUND:-0}" == "1" ]]; then
+    HOSTNAME_LOCAL="$(scutil --get LocalHostName 2>/dev/null || hostname -s)"
+    WORKER_LOG="${WORKER_LOG:-/tmp/llama-rpc-worker-${HOSTNAME_LOCAL}.log}"
+    nohup env BACKGROUND=0 "${BASH_SOURCE[0]}" "$@" >"$WORKER_LOG" 2>&1 &
+    WORKER_PID=$!
+
+    echo "GPU worker started in the background."
+    echo "  PID: $WORKER_PID"
+    echo "  Log: $WORKER_LOG"
+    echo "  Stop: kill $WORKER_PID"
+    exit 0
+fi
 
 echo "============================================================"
 echo " llama.cpp — SHARE MY MAC GPU"
